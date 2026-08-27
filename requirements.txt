@@ -1,0 +1,20 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+requests>=2.32.0
+redis>=5.0.0
+pillow>=10.0.0
+numpy>=1.26.0
+peft>=0.17.0
+accelerate>=1.4.0
+transformers>=4.57.0
+huggingface_hub>=0.30.0
+boto3>=1.35.0
+imageio>=2.37.0
+imageio-ffmpeg>=0.6.0
+av
+safetensors>=0.4.0
+ftfy>=6.0.0
+torchao>=0.9.0
+git+https://github.com/huggingface/diffusers
+# torch / torchvision 请按机器 CUDA 单独安装，例如：
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
