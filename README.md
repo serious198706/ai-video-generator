@@ -105,7 +105,7 @@ uvicorn wan22.api.app:app --port 8000
 
 ## 队列
 
-Redis List `{wan22}:queue` + Hash `{wan22}:task:{id}` + String `{wan22}:running`（哈希标签是给 ElastiCache Serverless 的 slot 约束）。深度（排队 + 正在跑）≥ `WAN22_QUEUE_MAX`（默认 50）返回 429。进程重启时若有 `running`，该任务标 `failed` / `interrupted` 并 webhook；已入队的继续消费。
+Redis List `{wan22}:queue` + Hash `{wan22}:task:{id}` + String `{wan22}:running`（哈希标签是给 ElastiCache Serverless 的 slot 约束）。Worker 用 LPOP 轮询，不用 BRPOP（Serverless TLS 会把阻塞读掐死）。深度（排队 + 正在跑）≥ `WAN22_QUEUE_MAX`（默认 50）返回 429。进程重启时若有 `running`，该任务标 `failed` / `interrupted` 并 webhook；已入队的继续消费。
 
 ## 已知约束
 

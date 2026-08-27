@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -37,8 +38,28 @@ def _now() -> str:
 def client() -> redis.Redis:
     global _client
     if _client is None:
-        _client = redis.Redis.from_url(config.REDIS_URL, decode_responses=True)
+        # Serverless + TLS 会掐空闲/阻塞读。不要设 socket_timeout，也不要用 BRPOP。
+        _client = redis.Redis.from_url(
+            config.REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_keepalive=True,
+            health_check_interval=30,
+            retry_on_timeout=True,
+        )
     return _client
+
+
+def reset_client() -> None:
+    global _client
+    old = _client
+    _client = None
+    if old is None:
+        return
+    try:
+        old.close()
+    except Exception:
+        pass
 
 
 def ping() -> None:
@@ -66,7 +87,7 @@ def _load(raw: dict[str, str]) -> dict[str, Any]:
         else:
             task[key] = int(task[key])
     for key in _OPTIONAL:
-        if task.get(key) == "":
+        if task.get(key) in (None, ""):
             task[key] = None
     return task
 
@@ -109,10 +130,19 @@ def pending() -> int:
 
 
 def pop_task(timeout: int = 5) -> str | None:
-    item = client().brpop(QUEUE_KEY, timeout=timeout)
-    if item is None:
-        return None
-    return item[1]
+    """RPUSH + LPOP。Serverless 上 BRPOP 会被 TLS 读超时打死。"""
+    deadline = time.monotonic() + max(timeout, 0)
+    while True:
+        try:
+            item = client().lpop(QUEUE_KEY)
+        except (redis.TimeoutError, redis.ConnectionError, OSError):
+            reset_client()
+            item = None
+        if item is not None:
+            return item
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.25)
 
 
 def set_running(task_id: str) -> None:

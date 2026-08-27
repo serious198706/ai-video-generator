@@ -51,7 +51,13 @@ def _loop() -> None:
         except Exception:
             logger.exception("pipeline preload failed")
     while True:
-        task_id = store.pop_task(timeout=5)
+        try:
+            task_id = store.pop_task(timeout=5)
+        except Exception:
+            logger.exception("queue pop failed")
+            store.reset_client()
+            time.sleep(1)
+            continue
         if not task_id:
             continue
         try:

@@ -57,9 +57,9 @@ def _public_task(task: dict) -> dict:
         "prompt": task["prompt"],
         "duration": task["duration"],
         "resolution": task.get("resolution"),
-        "seed": task["seed"],
-        "video_url": task["video_url"],
-        "error": task["error"],
+        "seed": task.get("seed"),
+        "video_url": task.get("video_url"),
+        "error": task.get("error"),
         "created_at": task["created_at"],
         "updated_at": task["updated_at"],
     }
