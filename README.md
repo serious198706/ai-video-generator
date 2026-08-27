@@ -73,7 +73,7 @@ Webhook body 与任务查询字段一致：`id`、`task_id`、`status`、`video_
 
 ## 启动
 
-需要本机或 ElastiCache Redis。GPU 机生产：
+需要本机或 ElastiCache Redis。ElastiCache Serverless 没有公网地址，GPU 上填控制台给的 `*.cache.amazonaws.com` 即可（VPC 内网 DNS）。**Serverless 必须用 `rediss://`（TLS）**，`redis://` 会连上端口但读超时。GPU 机生产：
 
 ```bash
 cp .env.example .env
@@ -105,7 +105,7 @@ uvicorn wan22.api.app:app --port 8000
 
 ## 队列
 
-Redis List `wan22:queue` + Hash `wan22:task:{id}` + String `wan22:running`。深度（排队 + 正在跑）≥ `WAN22_QUEUE_MAX`（默认 50）返回 429。进程重启时若有 `running`，该任务标 `failed` / `interrupted` 并 webhook；已入队的继续消费。
+Redis List `{wan22}:queue` + Hash `{wan22}:task:{id}` + String `{wan22}:running`（哈希标签是给 ElastiCache Serverless 的 slot 约束）。深度（排队 + 正在跑）≥ `WAN22_QUEUE_MAX`（默认 50）返回 429。进程重启时若有 `running`，该任务标 `failed` / `interrupted` 并 webhook；已入队的继续消费。
 
 ## 已知约束
 

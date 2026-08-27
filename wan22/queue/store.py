@@ -7,9 +7,10 @@ import redis
 
 from wan22 import config
 
-QUEUE_KEY = "wan22:queue"
-RUNNING_KEY = "wan22:running"
-TASK_PREFIX = "wan22:task:"
+# ElastiCache Serverless 按 Cluster slot 校验 MULTI。{wan22} 让 queue / running / task 同槽。
+QUEUE_KEY = "{wan22}:queue"
+RUNNING_KEY = "{wan22}:running"
+TASK_PREFIX = "{wan22}:task:"
 
 _OPTIONAL = (
     "negative_prompt",
