@@ -6,6 +6,7 @@ from pathlib import Path
 
 from wan22 import config
 from wan22.infer import generate
+from wan22.infer.foley import FoleyError, add_audio
 from wan22.log import get_logger
 from wan22.media import download, webhook
 from wan22.media.upload import upload_video
@@ -106,6 +107,17 @@ def _run(task_id: str) -> None:
             logger.exception("generate failed task=%s", task_id)
             _finish(task_id, status="failed", error="generate_failed")
             return
+
+        if config.FOLEY_ENABLE and not config.DRY_RUN:
+            try:
+                generate.pause_gpu()
+                add_audio(output)
+            except FoleyError:
+                logger.exception("foley required and failed task=%s", task_id)
+                _finish(task_id, status="failed", error="foley_failed")
+                return
+            finally:
+                generate.resume_gpu()
 
         try:
             video_url = (

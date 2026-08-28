@@ -17,9 +17,33 @@ export WAN22_LORA_DIR="${WAN22_LORA_DIR:-$MODEL_ROOT/loras}"
 export WAN22_NSFW_HIGH="${WAN22_NSFW_HIGH:-$WAN22_LORA_DIR/nsfw/NSFW-22-H-e8.safetensors}"
 export WAN22_NSFW_LOW="${WAN22_NSFW_LOW:-$WAN22_LORA_DIR/nsfw/NSFW-22-L-e8.safetensors}"
 
+FOLEY_VENV_DIR="${WAN22_FOLEY_VENV_DIR:-/opt/foley-venv}"
+export WAN22_FOLEY_PYTHON="${WAN22_FOLEY_PYTHON:-$FOLEY_VENV_DIR/bin/python}"
+export WAN22_FOLEY_REPO="${WAN22_FOLEY_REPO:-/opt/HunyuanVideo-Foley}"
+export WAN22_FOLEY_MODEL_DIR="${WAN22_FOLEY_MODEL_DIR:-/data/models/hunyuanvideo-foley}"
+export WAN22_FOLEY_SIZE="${WAN22_FOLEY_SIZE:-xl}"
+export WAN22_FOLEY_PROMPT="${WAN22_FOLEY_PROMPT:-sound effects matching the video, ambient Foley, no music, no speech}"
+export WAN22_FOLEY_NEG_PROMPT="${WAN22_FOLEY_NEG_PROMPT:-noisy, harsh, music, speech}"
+export WAN22_FOLEY_STEPS="${WAN22_FOLEY_STEPS:-50}"
+export WAN22_FOLEY_GUIDANCE="${WAN22_FOLEY_GUIDANCE:-4.5}"
+export WAN22_FOLEY_TIMEOUT="${WAN22_FOLEY_TIMEOUT:-180}"
+export WAN22_FOLEY_REQUIRED="${WAN22_FOLEY_REQUIRED:-0}"
+if [[ -z "${WAN22_FOLEY_ENABLE:-}" ]]; then
+  if [[ -x "$WAN22_FOLEY_PYTHON" ]]; then
+    WAN22_FOLEY_ENABLE=1
+  else
+    WAN22_FOLEY_ENABLE=0
+  fi
+fi
+export WAN22_FOLEY_ENABLE
+
 VENV_DIR="${WAN22_VENV_DIR:-/opt/wan22-venv}"
 if [[ ! -f "$VENV_DIR/bin/activate" ]]; then
   echo "[wan22] 虚拟环境不存在，请先运行 ./deploy.sh" >&2
+  exit 1
+fi
+if [[ "$WAN22_FOLEY_ENABLE" == "1" && ! -x "$WAN22_FOLEY_PYTHON" ]]; then
+  echo "[wan22] Foley 已打开但 $WAN22_FOLEY_PYTHON 不存在，请先运行 ./deploy.sh" >&2
   exit 1
 fi
 # shellcheck disable=SC1090

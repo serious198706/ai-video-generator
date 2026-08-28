@@ -37,6 +37,9 @@ async def lifespan(_app: FastAPI):
     logger.info("worker started")
     yield
     logger.info("service stopping")
+    from wan22.infer.foley import stop as stop_foley
+
+    stop_foley()
 
 
 app = FastAPI(

@@ -2,12 +2,25 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+
+if [[ -f .env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
+
 VENV_DIR="${WAN22_VENV_DIR:-/opt/wan22-venv}"
+FOLEY_VENV_DIR="${WAN22_FOLEY_VENV_DIR:-/opt/foley-venv}"
+FOLEY_REPO="${WAN22_FOLEY_REPO:-/opt/HunyuanVideo-Foley}"
+FOLEY_SKIP="${WAN22_FOLEY_SKIP:-0}"
 
 export HF_HOME="${HF_HOME:-/data/hf-cache}"
 export MODEL_ROOT="${MODEL_ROOT:-/data/models/wan22}"
 export WAN22_MODEL_DIR="${WAN22_MODEL_DIR:-$MODEL_ROOT/base/WAMU_v3_WAN2.2_I2V_LIGHTNING}"
 export WAN22_LORA_DIR="${WAN22_LORA_DIR:-$MODEL_ROOT/loras}"
+export WAN22_FOLEY_MODEL_DIR="${WAN22_FOLEY_MODEL_DIR:-/data/models/hunyuanvideo-foley}"
 
 if ! command -v python3 >/dev/null 2>&1; then
   echo "[wan22] missing command: python3" >&2
@@ -45,5 +58,47 @@ hf download lopi999/Wan2.2-I2V_General-NSFW-LoRA \
   NSFW-22-L-e8.safetensors \
   --revision aeef17d7fa51 \
   --local-dir "$WAN22_LORA_DIR/nsfw"
+
+if [[ "$FOLEY_SKIP" == "1" ]]; then
+  echo "[wan22] WAN22_FOLEY_SKIP=1, skip Foley"
+else
+  if ! command -v git >/dev/null 2>&1; then
+    echo "[wan22] Foley 需要 git，请先安装" >&2
+    exit 1
+  fi
+
+  if [[ -d "$FOLEY_REPO/.git" ]]; then
+    echo "[wan22] updating HunyuanVideo-Foley: $FOLEY_REPO"
+    git -C "$FOLEY_REPO" pull --ff-only || \
+      echo "[wan22] Foley repo not fast-forward, keep local clone" >&2
+  elif [[ -d "$FOLEY_REPO/hunyuanvideo_foley" ]]; then
+    echo "[wan22] Foley repo already present: $FOLEY_REPO"
+  else
+    echo "[wan22] cloning HunyuanVideo-Foley: $FOLEY_REPO"
+    git clone --depth 1 \
+      https://github.com/Tencent-Hunyuan/HunyuanVideo-Foley \
+      "$FOLEY_REPO"
+  fi
+
+  if [[ ! -f "$FOLEY_VENV_DIR/bin/python" ]]; then
+    echo "[wan22] creating Foley virtual environment: $FOLEY_VENV_DIR"
+    python3 -m venv "$FOLEY_VENV_DIR"
+  fi
+
+  echo "[wan22] installing Foley dependencies (separate venv)"
+  "$FOLEY_VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel
+  "$FOLEY_VENV_DIR/bin/python" -m pip install --upgrade torch torchvision torchaudio \
+    --index-url https://download.pytorch.org/whl/cu128
+  "$FOLEY_VENV_DIR/bin/python" -m pip install --upgrade -r "$FOLEY_REPO/requirements.txt"
+  # requirements.txt 可能把 torch 装成 CPU 轮，再钉回 cu128
+  "$FOLEY_VENV_DIR/bin/python" -m pip install --upgrade torch torchvision torchaudio \
+    --index-url https://download.pytorch.org/whl/cu128
+  "$FOLEY_VENV_DIR/bin/python" -m pip install -e "$FOLEY_REPO"
+
+  mkdir -p "$WAN22_FOLEY_MODEL_DIR"
+  echo "[wan22] downloading HunyuanVideo-Foley weights"
+  hf download tencent/HunyuanVideo-Foley \
+    --local-dir "$WAN22_FOLEY_MODEL_DIR"
+fi
 
 echo "[wan22] deployment complete; run: $SCRIPT_DIR/start.sh"

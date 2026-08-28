@@ -140,6 +140,12 @@ def _check_model_metadata() -> None:
 def _validate_config() -> None:
     if config.OFFLOAD not in {"model", "sequential", "none"}:
         raise ValueError("WAN22_OFFLOAD 只能是 model、sequential 或 none")
+    if config.FOLEY_SIZE not in {"xl", "xxl"}:
+        raise ValueError("WAN22_FOLEY_SIZE 只能是 xl 或 xxl")
+    if config.FOLEY_STEPS < 1:
+        raise ValueError("WAN22_FOLEY_STEPS 必须大于 0")
+    if config.FOLEY_TIMEOUT < 1:
+        raise ValueError("WAN22_FOLEY_TIMEOUT 必须大于 0")
     if config.NUM_STEPS < 1:
         raise ValueError("WAN22_STEPS 必须大于 0")
     if config.FPS < 1:
@@ -167,6 +173,8 @@ def _validate_config() -> None:
     ):
         if value < 0:
             raise ValueError(f"{name} 不能为负数")
+    if config.FOLEY_ENABLE and config.OFFLOAD != "none":
+        raise ValueError("Foley 需要 WAN22_OFFLOAD=none，成片后才能把 Wan 整模挪到 CPU")
 
 
 def preflight() -> None:
@@ -198,6 +206,11 @@ def preflight() -> None:
         logger.info("lora %s: %s, scale=%s, %s", name, status, scale, path)
         if status.startswith(("MISSING", "UNREADABLE", "SUSPECT")):
             raise ValueError(f"LoRA {name} 不可用: {status} ({path})")
+
+    if config.FOLEY_ENABLE:
+        from wan22.infer import foley as foley_mod
+
+        foley_mod.preflight()
 
     logger.info(
         "last_image support=%s steps=%s cfg=%s/%s",
@@ -325,6 +338,29 @@ def load_pipe():
             _load_error = str(exc)
             logger.exception("pipeline load failed")
             raise
+
+
+def pause_gpu() -> None:
+    """把 Wan pipeline 挪到 CPU，把显存让给 Foley。"""
+    import torch
+
+    with _pipe_lock:
+        if _pipe is None:
+            return
+        _log_memory("wan pause gpu")
+        _pipe.to("cpu")
+        torch.cuda.empty_cache()
+        _log_memory("wan on cpu")
+
+
+def resume_gpu() -> None:
+    """Foley 结束后把 Wan 放回 GPU。"""
+    with _pipe_lock:
+        if _pipe is None:
+            return
+        _log_memory("wan resume gpu")
+        _pipe.to("cuda")
+        _log_memory("wan on cuda")
 
 
 def _snap_frames(seconds: float) -> int:

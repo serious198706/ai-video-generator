@@ -19,6 +19,8 @@ server/
 
 ## 协议
 
+Java 调用端见 [JAVA.md](JAVA.md)（提交 / 查询 / webhook / 探活）。
+
 `POST /v1/generate`，`application/json`，无鉴权。立刻 `202`：
 
 ```json
@@ -54,7 +56,7 @@ server/
 
 图片 URL 必须解析到公网（防 SSRF）。Webhook 走独立白名单，**允许内网 IP**（Java 就在内网），但仍拒绝链路本地 / `169.254.169.254`。
 
-Webhook body 与任务查询字段一致：`id`、`task_id`、`status`、`video_url`、`error`、`seed`、`duration`、`resolution`。失败时 `error` 仅为短码：`generate_failed` / `upload_failed` / `download_failed` / `interrupted`。配置了 `WAN22_WEBHOOK_SECRET` 时带 `X-Wan-Signature: sha256=…`。
+Webhook body 与任务查询字段一致：`id`、`task_id`、`status`、`video_url`、`error`、`seed`、`duration`、`resolution`。失败时 `error` 仅为短码：`generate_failed` / `foley_failed` / `upload_failed` / `download_failed` / `interrupted`。配置了 `WAN22_WEBHOOK_SECRET` 时带 `X-Wan-Signature: sha256=…`。
 
 ## 配置
 
@@ -77,10 +79,12 @@ Webhook body 与任务查询字段一致：`id`、`task_id`、`status`、`video_
 
 ```bash
 cp .env.example .env
-# 改 hosts / redis
+# 改 hosts / redis / S3
 ./deploy.sh
 ./start.sh
 ```
+
+`deploy.sh` 会装 Wan venv、WAMU 权重，以及独立的 Foley venv（`/opt/foley-venv`）和 HunyuanVideo-Foley XL 权重。只要 Foley 的 python 在，`start.sh` 默认打开配音。不要 Foley：`.env` 里 `WAN22_FOLEY_ENABLE=0`，或 `WAN22_FOLEY_SKIP=1 ./deploy.sh`。
 
 无 GPU 联调：
 
@@ -106,6 +110,12 @@ uvicorn wan22.api.app:app --port 8000
 ## 队列
 
 Redis List `{wan22}:queue` + Hash `{wan22}:task:{id}` + String `{wan22}:running`（哈希标签是给 ElastiCache Serverless 的 slot 约束）。Worker 用 LPOP 轮询，不用 BRPOP（Serverless TLS 会把阻塞读掐死）。深度（排队 + 正在跑）≥ `WAN22_QUEUE_MAX`（默认 50）返回 429。进程重启时若有 `running`，该任务标 `failed` / `interrupted` 并 webhook；已入队的继续消费。
+
+## 音频（可选）
+
+`deploy.sh` 装好后，worker 在成片上传前：把 Wan 挪到 CPU → HunyuanVideo-Foley XL 看视频出 wav（固定 `WAN22_FOLEY_PROMPT`，不用视频 prompt）→ ffmpeg 并轨 → Wan 回到 GPU。
+
+Foley 钉了旧版 transformers，venv 与 Wan 分开。Sidecar 常驻，权重闲时放 CPU。`WAN22_FOLEY_REQUIRED=0`（默认）时 Foley 失败仍上传无声片；`=1` 则 `failed` / `foley_failed`。需要 `WAN22_OFFLOAD=none`。
 
 ## 已知约束
 

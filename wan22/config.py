@@ -72,6 +72,23 @@ LOG_LEVEL = os.environ.get("WAN22_LOG_LEVEL", "INFO").upper()
 LOG_BACKUP_DAYS = int(os.environ.get("WAN22_LOG_BACKUP_DAYS", "30"))
 LOG_CONSOLE = os.environ.get("WAN22_LOG_CONSOLE", "1") == "1"
 
+FOLEY_ENABLE = os.environ.get("WAN22_FOLEY_ENABLE", "0") == "1"
+FOLEY_REQUIRED = os.environ.get("WAN22_FOLEY_REQUIRED", "0") == "1"
+FOLEY_PYTHON = os.environ.get("WAN22_FOLEY_PYTHON", "").strip()
+FOLEY_REPO = Path(os.environ.get("WAN22_FOLEY_REPO", "")).expanduser() if os.environ.get("WAN22_FOLEY_REPO") else None
+FOLEY_MODEL_DIR = Path(
+    os.environ.get("WAN22_FOLEY_MODEL_DIR", "/data/models/hunyuanvideo-foley")
+).expanduser()
+FOLEY_SIZE = os.environ.get("WAN22_FOLEY_SIZE", "xl").strip().lower()
+FOLEY_PROMPT = os.environ.get(
+    "WAN22_FOLEY_PROMPT",
+    "sound effects matching the video, ambient Foley, no music, no speech",
+)
+FOLEY_NEG_PROMPT = os.environ.get("WAN22_FOLEY_NEG_PROMPT", "noisy, harsh, music, speech")
+FOLEY_STEPS = int(os.environ.get("WAN22_FOLEY_STEPS", "50"))
+FOLEY_GUIDANCE = float(os.environ.get("WAN22_FOLEY_GUIDANCE", "4.5"))
+FOLEY_TIMEOUT = int(os.environ.get("WAN22_FOLEY_TIMEOUT", "180"))
+
 DEFAULT_PROMPT = os.environ.get(
     "WAN22_DEFAULT_PROMPT",
     "make this image come alive, cinematic motion, smooth animation",
