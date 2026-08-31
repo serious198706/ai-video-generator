@@ -38,7 +38,8 @@ Java 调用端见 [JAVA.md](JAVA.md)（提交 / 查询 / webhook / 探活）。
   "steps": 6,
   "quality": 6,
   "seed": 123,
-  "lastImage": null
+  "lastImage": null,
+  "audio": true
 }
 ```
 
@@ -51,6 +52,7 @@ Java 调用端见 [JAVA.md](JAVA.md)（提交 / 查询 / webhook / 探活）。
 | `resolution` | 否 | `540p` / `720p` / `1080p`，本轮只记录，画布仍 480×832 |
 | `webhookUrl` | 否 | 成功和失败都会 POST |
 | `steps` / `quality` / `seed` / `lastImage` | 否 | Wan 私有字段；`quality` 为导出 1–10 |
+| `audio` | 否 | 是否配 Foley，默认 `true` |
 
 `GET /v1/tasks/{id}` 可轮询。`/health` 恒 200；`/ready` 模型未就绪时 503。`/docs` 默认关闭。
 

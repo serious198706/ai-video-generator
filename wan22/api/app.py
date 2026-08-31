@@ -63,6 +63,7 @@ def _public_task(task: dict) -> dict:
         "seed": task.get("seed"),
         "video_url": task.get("video_url"),
         "error": task.get("error"),
+        "audio": bool(task.get("audio", True)),
         "created_at": task["created_at"],
         "updated_at": task["updated_at"],
     }
@@ -140,6 +141,7 @@ def create_generation(body: GenerateRequest):
                 "seed": body.seed,
                 "steps": body.steps,
                 "quality": body.quality,
+                "audio": True if body.audio is None else bool(body.audio),
             },
         )
     except Exception:
@@ -148,12 +150,13 @@ def create_generation(body: GenerateRequest):
         raise HTTPException(503, "queue unavailable") from None
 
     logger.info(
-        "queued task=%s duration=%s resolution=%s steps=%s quality=%s pending=%s webhook=%s",
+        "queued task=%s duration=%s resolution=%s steps=%s quality=%s audio=%s pending=%s webhook=%s",
         task_id,
         body.duration,
         body.resolution,
         body.steps,
         body.quality,
+        True if body.audio is None else bool(body.audio),
         pending + 1,
         bool(body.webhook_url),
     )

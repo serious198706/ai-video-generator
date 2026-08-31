@@ -26,6 +26,7 @@ Content-Type: application/json
 | quality | integer | 否 | 导出质量 1–10 |
 | seed | integer | 否 | 不传则服务端随机；完成后可在查询 / webhook 拿到实际值 |
 | lastImage | string | 否 | 尾帧 HTTPS URL，约束同 image |
+| audio | boolean | 否 | 是否配 Foley。默认 `true`。`false` 则只出无声片，不占 Foley 时间。服务端关掉 Foley 时即使传 `true` 也是无声片 |
 
 请求示例：
 
@@ -40,7 +41,8 @@ Content-Type: application/json
   "steps": 4,
   "quality": 6,
   "seed": 123,
-  "lastImage": null
+  "lastImage": null,
+  "audio": true
 }
 ```
 
@@ -105,6 +107,7 @@ Content-Type: application/json
 | seed | integer | 否 | 未指定且未跑完为 null；成功后为实际种子 |
 | video_url | string | 否 | 成功为 CloudFront mp4；其它状态 null |
 | error | string | 否 | 仅 failed 时有短码；其它状态 null |
+| audio | boolean | 是 | 这条任务是否要求配音 |
 | created_at | string | 是 | UTC ISO-8601 |
 | updated_at | string | 是 | UTC ISO-8601 |
 
@@ -140,6 +143,7 @@ error 短码（不要当给人看的长文案）：
   "seed": 123,
   "video_url": "https://d2ud1xskuh00y0.cloudfront.net/video/d4d4c0ea896e4f6ca6425930c41398aa.mp4",
   "error": null,
+  "audio": true,
   "created_at": "2026-08-27T09:26:00.000000+00:00",
   "updated_at": "2026-08-27T09:26:41.000000+00:00"
 }

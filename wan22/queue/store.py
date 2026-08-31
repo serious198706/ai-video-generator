@@ -40,6 +40,7 @@ _UPDATABLE = frozenset(
         "quality",
         "video_url",
         "error",
+        "audio",
         "in_queue",
     }
 )
@@ -87,6 +88,7 @@ def client() -> sqlite3.Connection:
                 quality INTEGER,
                 video_url TEXT,
                 error TEXT,
+                audio INTEGER NOT NULL DEFAULT 1,
                 in_queue INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -100,6 +102,11 @@ def client() -> sqlite3.Connection:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)"
         )
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
+        if "audio" not in cols:
+            conn.execute(
+                "ALTER TABLE tasks ADD COLUMN audio INTEGER NOT NULL DEFAULT 1"
+            )
         _conn = conn
     return _conn
 
@@ -121,6 +128,12 @@ def ping() -> None:
         client().execute("SELECT 1").fetchone()
 
 
+def _audio_int(value: Any) -> int:
+    if value is None or value == "":
+        return 1
+    return 1 if bool(value) else 0
+
+
 def _dump(value: Any) -> Any:
     if value is None or value == "":
         return None
@@ -136,6 +149,10 @@ def _load(row: sqlite3.Row | None) -> dict[str, Any] | None:
     for key in ("seed", "steps", "quality"):
         if task.get(key) is not None:
             task[key] = int(task[key])
+    if "audio" in task:
+        task["audio"] = bool(task["audio"]) if task["audio"] is not None else True
+    else:
+        task["audio"] = True
     for key in _OPTIONAL:
         if task.get(key) == "":
             task[key] = None
@@ -150,9 +167,9 @@ def create_task(task_id: str, fields: dict[str, Any]) -> dict[str, Any]:
             INSERT INTO tasks (
                 id, status, prompt, negative_prompt, image_url, last_image_url,
                 first_frame_path, last_frame_path, duration, resolution, webhook_url,
-                seed, steps, quality, video_url, error, in_queue, created_at, updated_at
+                seed, steps, quality, video_url, error, audio, in_queue, created_at, updated_at
             ) VALUES (
-                ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 1, ?, ?
+                ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, 1, ?, ?
             )
             """,
             (
@@ -169,6 +186,7 @@ def create_task(task_id: str, fields: dict[str, Any]) -> dict[str, Any]:
                 _dump(fields.get("seed")),
                 _dump(fields.get("steps")),
                 _dump(fields.get("quality")),
+                _audio_int(fields.get("audio")),
                 now,
                 now,
             ),

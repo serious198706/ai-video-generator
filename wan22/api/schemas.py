@@ -18,6 +18,7 @@ class GenerateRequest(BaseModel):
     quality: int | None = Field(default=None, ge=1, le=10)
     seed: int | None = None
     last_image: str | None = Field(default=None, alias="lastImage")
+    audio: bool | None = True
 
     @field_validator("image", "last_image", "webhook_url", "prompt", "negative_prompt")
     @classmethod

@@ -87,11 +87,12 @@ def _run(task_id: str) -> None:
     store.set_running(task_id)
     store.update_task(task_id, status="running", error=None)
     logger.info(
-        "running task=%s duration=%s resolution=%s steps=%s",
+        "running task=%s duration=%s resolution=%s steps=%s audio=%s",
         task_id,
         task.get("duration"),
         task.get("resolution"),
         task.get("steps"),
+        bool(task.get("audio", True)),
     )
     try:
         first_path = _ensure_image(task, "first")
@@ -126,7 +127,7 @@ def _run(task_id: str) -> None:
             return
         generate_s = time.monotonic() - gen_started
 
-        if config.FOLEY_ENABLE and not config.DRY_RUN:
+        if config.FOLEY_ENABLE and not config.DRY_RUN and bool(task.get("audio", True)):
             foley_failed = False
             foley_t = time.monotonic()
             try:
@@ -240,7 +241,11 @@ def _log_timing(
     """固定 key=value，方便后期 grep / 收集。total_s = 开跑 I2V 到 S3 传完。"""
     steps = task.get("steps") if task.get("steps") is not None else config.NUM_STEPS
     quality = task.get("quality") if task.get("quality") is not None else config.VIDEO_QUALITY
-    foley_on = 1 if config.FOLEY_ENABLE and not config.DRY_RUN else 0
+    foley_on = (
+        1
+        if config.FOLEY_ENABLE and not config.DRY_RUN and bool(task.get("audio", True))
+        else 0
+    )
     prompt = task.get("prompt") or ""
     fields = [
         f"task={task['id']}",
