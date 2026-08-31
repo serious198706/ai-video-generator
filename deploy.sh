@@ -86,13 +86,16 @@ else
   fi
 
   FOLEY_PY="$FOLEY_VENV_DIR/bin/python"
-  echo "[wan22] installing Foley dependencies (separate venv, keep existing interpreter)"
+  FOLEY_CONSTRAINTS="$SCRIPT_DIR/foley-constraints.txt"
+  echo "[wan22] Foley pip using $FOLEY_PY (do not rebuild venv)"
+  echo "[wan22] Foley: binary-only pillow/numpy via $FOLEY_CONSTRAINTS"
   "$FOLEY_PY" -m pip install --upgrade pip setuptools wheel
   "$FOLEY_PY" -m pip install --upgrade torch torchvision torchaudio \
     --index-url https://download.pytorch.org/whl/cu128
-  # 3.14 没有旧 pillow / numpy==1.26 的轮子，禁止走源码编。不重建 venv。
-  echo "[wan22] Foley: binary pillow/numpy (skip jpeg source build)"
-  "$FOLEY_PY" -m pip install --upgrade --only-binary=:all: 'pillow>=11.3' 'numpy>=2.2'
+  "$FOLEY_PY" -m pip install --upgrade \
+    --only-binary=pillow,numpy \
+    -c "$FOLEY_CONSTRAINTS" \
+    'pillow>=11.3' 'numpy>=2.2'
   FOLEY_REQ="$(mktemp)"
   WAN22_FOLEY_REQ_IN="$FOLEY_REPO/requirements.txt" WAN22_FOLEY_REQ_OUT="$FOLEY_REQ" \
     "$FOLEY_PY" - <<'PY'
@@ -107,13 +110,23 @@ for line in src:
     out.append(line)
 Path(os.environ["WAN22_FOLEY_REQ_OUT"]).write_text("\n".join(out) + "\n")
 PY
-  "$FOLEY_PY" -m pip install --upgrade -r "$FOLEY_REQ"
+  echo "[wan22] Foley filtered requirements (no pillow/numpy pins):"
+  cat "$FOLEY_REQ"
+  # descript-audiotools 会再拉 pillow；不加 only-binary 就会源码编 jpeg 失败。
+  "$FOLEY_PY" -m pip install \
+    --upgrade-strategy only-if-needed \
+    --only-binary=pillow,numpy \
+    -c "$FOLEY_CONSTRAINTS" \
+    -r "$FOLEY_REQ"
   rm -f "$FOLEY_REQ"
-  "$FOLEY_PY" -m pip install --upgrade --only-binary=:all: 'pillow>=11.3' 'numpy>=2.2'
-  # requirements.txt 可能把 torch 装成 CPU 轮，再钉回 cu128
+  "$FOLEY_PY" -m pip install --upgrade \
+    --only-binary=pillow,numpy \
+    -c "$FOLEY_CONSTRAINTS" \
+    'pillow>=11.3' 'numpy>=2.2'
   "$FOLEY_PY" -m pip install --upgrade torch torchvision torchaudio \
     --index-url https://download.pytorch.org/whl/cu128
-  "$FOLEY_PY" -m pip install -e "$FOLEY_REPO"
+  "$FOLEY_PY" -m pip install --only-binary=pillow,numpy -c "$FOLEY_CONSTRAINTS" \
+    -e "$FOLEY_REPO"
 
   mkdir -p "$WAN22_FOLEY_MODEL_DIR"
   echo "[wan22] downloading HunyuanVideo-Foley weights"

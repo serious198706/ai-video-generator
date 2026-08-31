@@ -1,0 +1,3 @@
+# Foley 在 Python 3.14 上禁止走旧 pillow / numpy==1.26 源码编译。
+pillow>=11.3
+numpy>=2.2
