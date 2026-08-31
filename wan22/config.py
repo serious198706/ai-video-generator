@@ -61,7 +61,7 @@ S3_PREFIX = os.environ.get("WAN22_S3_PREFIX", "wan22/")
 S3_PUBLIC_BASE_URL = os.environ.get("WAN22_S3_PUBLIC_BASE_URL", "").rstrip("/")
 S3_ENDPOINT = os.environ.get("WAN22_S3_ENDPOINT", "")
 
-REDIS_URL = os.environ.get("WAN22_REDIS_URL", "redis://127.0.0.1:6379/0")
+QUEUE_DB = _abs(Path(os.environ.get("WAN22_QUEUE_DB", str(ROOT / "queue.sqlite"))), ROOT)
 QUEUE_MAX = int(os.environ.get("WAN22_QUEUE_MAX", "50"))
 UPLOAD_MAX_BYTES = int(os.environ.get("WAN22_UPLOAD_MAX_BYTES", str(10 * 1024 * 1024)))
 ENABLE_DOCS = os.environ.get("WAN22_DOCS", "0") == "1"
@@ -87,9 +87,13 @@ FOLEY_MODEL_DIR = Path(
 FOLEY_SIZE = os.environ.get("WAN22_FOLEY_SIZE", "xl").strip().lower()
 FOLEY_PROMPT = os.environ.get(
     "WAN22_FOLEY_PROMPT",
-    "sound effects matching the video, ambient Foley, no music, no speech",
+    "intimate erotic Foley matching the video, soft sensual ambient music, "
+    "sultry atmosphere, breathy room tone, no speech, no lyrics",
 )
-FOLEY_NEG_PROMPT = os.environ.get("WAN22_FOLEY_NEG_PROMPT", "noisy, harsh, music, speech")
+FOLEY_NEG_PROMPT = os.environ.get(
+    "WAN22_FOLEY_NEG_PROMPT",
+    "noisy, harsh, speech, lyrics, shouting",
+)
 FOLEY_STEPS = int(os.environ.get("WAN22_FOLEY_STEPS", "50"))
 FOLEY_GUIDANCE = float(os.environ.get("WAN22_FOLEY_GUIDANCE", "4.5"))
 FOLEY_TIMEOUT = int(os.environ.get("WAN22_FOLEY_TIMEOUT", "180"))

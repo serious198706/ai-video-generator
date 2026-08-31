@@ -24,7 +24,7 @@ async def lifespan(_app: FastAPI):
     setup_logging(force=True)
     logger.info("service starting dry_run=%s docs=%s", config.DRY_RUN, config.ENABLE_DOCS)
     store.ping()
-    logger.info("redis ok")
+    logger.info("sqlite queue %s", config.QUEUE_DB)
     if not config.DRY_RUN:
         assert_s3()
         logger.info(
@@ -81,7 +81,7 @@ def create_generation(body: GenerateRequest):
     except HTTPException:
         raise
     except Exception:
-        logger.exception("redis unavailable on enqueue")
+        logger.exception("queue unavailable on enqueue")
         raise HTTPException(503, "queue unavailable")
 
     if body.webhook_url:
@@ -165,7 +165,7 @@ def get_task(task_id: str):
     try:
         task = store.get_task(task_id)
     except Exception:
-        logger.exception("redis unavailable on get task=%s", task_id)
+        logger.exception("queue unavailable on get task=%s", task_id)
         raise HTTPException(503, "queue unavailable") from None
     if not task:
         raise HTTPException(404, "task 不存在")

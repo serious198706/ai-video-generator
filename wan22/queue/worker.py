@@ -31,18 +31,23 @@ def start() -> None:
 
 
 def _recover_interrupted() -> None:
-    task_id = store.take_interrupted()
-    if not task_id:
-        return
-    task = store.get_task(task_id)
-    if not task or task.get("status") != "running":
-        logger.info("cleared stale running key task=%s status=%s", task_id, (task or {}).get("status"))
-        return
-    store.update_task(task_id, status="failed", error="interrupted")
-    updated = store.get_task(task_id)
-    if updated:
-        webhook.notify(updated)
-    logger.warning("interrupted running task=%s", task_id)
+    while True:
+        task_id = store.take_interrupted()
+        if not task_id:
+            return
+        task = store.get_task(task_id)
+        if not task or task.get("status") != "running":
+            logger.info(
+                "cleared stale running key task=%s status=%s",
+                task_id,
+                (task or {}).get("status"),
+            )
+            return
+        store.update_task(task_id, status="failed", error="interrupted")
+        updated = store.get_task(task_id)
+        if updated:
+            webhook.notify(updated)
+        logger.warning("interrupted running task=%s", task_id)
 
 
 def _loop() -> None:

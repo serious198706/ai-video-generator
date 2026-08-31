@@ -11,7 +11,7 @@ server/
     config.py
     log.py        按日滚动的 wan22.log
     api/          FastAPI 路由与请求体
-    queue/        Redis 任务与 worker
+    queue/        SQLite 任务与 worker
     infer/        Wan pipeline
     media/        下图、上传、webhook
     net/          URL 白名单 / SSRF
@@ -64,7 +64,6 @@ Webhook body 与任务查询字段一致：`id`、`task_id`、`status`、`video_
 
 必填白名单：
 
-- `WAN22_REDIS_URL`
 - `WAN22_IMAGE_HOSTS`（空则拒绝下图）
 - `WAN22_WEBHOOK_HOSTS`（请求带了 `webhookUrl` 但此项为空则 400）
 - `WAN22_S3_BUCKET`（非 DRY_RUN 启动时必填）
@@ -75,11 +74,11 @@ Webhook body 与任务查询字段一致：`id`、`task_id`、`status`、`video_
 
 ## 启动
 
-需要本机或 ElastiCache Redis。ElastiCache Serverless 没有公网地址，GPU 上填控制台给的 `*.cache.amazonaws.com` 即可（VPC 内网 DNS）。**Serverless 必须用 `rediss://`（TLS）**，`redis://` 会连上端口但读超时。GPU 机生产：
+需要本机 SQLite（默认 `{WAN22_DATA_DIR}/queue.sqlite`，不另起中间件）。GPU 机生产：
 
 ```bash
 cp .env.example .env
-# 改 hosts / redis / S3
+# 改 hosts / S3
 ./deploy.sh
 ./start.sh
 ```
@@ -109,7 +108,7 @@ uvicorn wan22.api.app:app --port 8000
 
 ## 队列
 
-Redis List `{wan22}:queue` + Hash `{wan22}:task:{id}` + String `{wan22}:running`（哈希标签是给 ElastiCache Serverless 的 slot 约束）。Worker 用 LPOP 轮询，不用 BRPOP（Serverless TLS 会把阻塞读掐死）。深度（排队 + 正在跑）≥ `WAN22_QUEUE_MAX`（默认 50）返回 429。进程重启时若有 `running`，该任务标 `failed` / `interrupted` 并 webhook；已入队的继续消费。
+本机 SQLite `{WAN22_DATA_DIR}/queue.sqlite`（可用 `WAN22_QUEUE_DB` 改路径）。Worker 轮询出队。深度（排队 + 正在跑）≥ `WAN22_QUEUE_MAX`（默认 50）返回 429。进程重启时若有 `running`，该任务标 `failed` / `interrupted` 并 webhook；已入队的继续消费。
 
 ## 音频（可选）
 
