@@ -91,6 +91,10 @@ def _run(task_id: str) -> None:
     try:
         first_path = _ensure_image(task, "first")
         last_path = _ensure_image(task, "last") if task.get("last_image_url") else last_path
+        generate_s = foley_s = upload_s = 0.0
+        foley_ok = 0
+        used_seed = task.get("seed")
+        gen_started = time.monotonic()
         try:
             used_seed = generate.generate_video(
                 prompt=task["prompt"],
@@ -105,20 +109,45 @@ def _run(task_id: str) -> None:
             )
         except Exception:
             logger.exception("generate failed task=%s", task_id)
+            _log_timing(
+                task,
+                status="failed",
+                error="generate_failed",
+                seed=used_seed,
+                total_s=time.monotonic() - gen_started,
+                generate_s=time.monotonic() - gen_started,
+            )
             _finish(task_id, status="failed", error="generate_failed")
             return
+        generate_s = time.monotonic() - gen_started
 
         if config.FOLEY_ENABLE and not config.DRY_RUN:
+            foley_failed = False
+            foley_t = time.monotonic()
             try:
                 generate.pause_gpu()
-                add_audio(output)
+                foley_ok = int(bool(add_audio(output)))
             except FoleyError:
+                foley_failed = True
                 logger.exception("foley required and failed task=%s", task_id)
-                _finish(task_id, status="failed", error="foley_failed")
-                return
             finally:
                 generate.resume_gpu()
+                foley_s = time.monotonic() - foley_t
+            if foley_failed:
+                _log_timing(
+                    task,
+                    status="failed",
+                    error="foley_failed",
+                    seed=used_seed,
+                    total_s=time.monotonic() - gen_started,
+                    generate_s=generate_s,
+                    foley_s=foley_s,
+                    foley_ok=0,
+                )
+                _finish(task_id, status="failed", error="foley_failed")
+                return
 
+        upload_t = time.monotonic()
         try:
             video_url = (
                 f"http://127.0.0.1/dry-run/{task_id}.mp4"
@@ -127,15 +156,38 @@ def _run(task_id: str) -> None:
             )
         except Exception:
             logger.exception("upload failed task=%s", task_id)
+            _log_timing(
+                task,
+                status="failed",
+                error="upload_failed",
+                seed=used_seed,
+                total_s=time.monotonic() - gen_started,
+                generate_s=generate_s,
+                foley_s=foley_s,
+                upload_s=time.monotonic() - upload_t,
+                foley_ok=foley_ok,
+            )
             _finish(task_id, status="failed", error="upload_failed")
             return
+        upload_s = time.monotonic() - upload_t
+        total_s = time.monotonic() - gen_started
+        wall_s = time.monotonic() - started
 
-        elapsed = time.monotonic() - started
+        _log_timing(
+            task,
+            status="succeeded",
+            seed=used_seed,
+            total_s=total_s,
+            generate_s=generate_s,
+            foley_s=foley_s,
+            upload_s=upload_s,
+            foley_ok=foley_ok,
+        )
         logger.info(
             "succeeded task=%s seed=%s elapsed=%.1fs video=%s",
             task_id,
             used_seed,
-            elapsed,
+            wall_s,
             video_url,
         )
         _finish(
@@ -166,6 +218,47 @@ def _ensure_image(task: dict, kind: str) -> str:
     saved = download.download_image(url, config.UPLOAD_DIR / f"{task['id']}_{kind}")
     store.update_task(task["id"], **{path_key: saved})
     return saved
+
+
+def _log_timing(
+    task: dict,
+    *,
+    status: str,
+    seed,
+    total_s: float,
+    generate_s: float = 0.0,
+    foley_s: float = 0.0,
+    upload_s: float = 0.0,
+    foley_ok: int = 0,
+    error: str | None = None,
+) -> None:
+    """固定 key=value，方便后期 grep / 收集。total_s = 开跑 I2V 到 S3 传完。"""
+    steps = task.get("steps") if task.get("steps") is not None else config.NUM_STEPS
+    quality = task.get("quality") if task.get("quality") is not None else config.VIDEO_QUALITY
+    foley_on = 1 if config.FOLEY_ENABLE and not config.DRY_RUN else 0
+    prompt = task.get("prompt") or ""
+    fields = [
+        f"task={task['id']}",
+        f"status={status}",
+        f"total_s={total_s:.3f}",
+        f"generate_s={generate_s:.3f}",
+        f"foley_s={foley_s:.3f}",
+        f"upload_s={upload_s:.3f}",
+        f"duration={task.get('duration')}",
+        f"resolution={task.get('resolution') or '-'}",
+        f"steps={steps}",
+        f"quality={quality}",
+        f"seed={seed if seed is not None else '-'}",
+        f"last_frame={1 if task.get('last_image_url') else 0}",
+        f"prompt_chars={len(prompt)}",
+        f"foley={foley_on}",
+        f"foley_ok={foley_ok}",
+        f"foley_steps={config.FOLEY_STEPS if foley_on else 0}",
+        f"foley_size={config.FOLEY_SIZE if foley_on else '-'}",
+    ]
+    if error:
+        fields.append(f"error={error}")
+    logger.info("timing %s", " ".join(fields))
 
 
 def _finish(task_id: str, **fields) -> None:
