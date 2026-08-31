@@ -49,14 +49,17 @@ def add_audio(video_path: str) -> bool:
     """给无声 mp4 配 Foley。成功返回 True；关闭或失败返回 False（REQUIRED 时抛错）。"""
     if not config.FOLEY_ENABLE:
         return False
+    video = Path(video_path).expanduser().resolve()
+    wav = video.with_suffix(".wav")
     try:
-        wav = Path(video_path).with_suffix(".wav")
+        if not video.is_file():
+            raise FoleyError(f"video missing: {video}")
         with _lock:
             _ensure()
             _request(
                 {
                     "cmd": "generate",
-                    "video": str(video_path),
+                    "video": str(video),
                     "wav": str(wav),
                     "prompt": config.FOLEY_PROMPT,
                     "neg_prompt": config.FOLEY_NEG_PROMPT,
@@ -64,13 +67,13 @@ def add_audio(video_path: str) -> bool:
                     "guidance": config.FOLEY_GUIDANCE,
                 }
             )
-        mux_audio(video_path, str(wav))
+        mux_audio(str(video), str(wav))
         wav.unlink(missing_ok=True)
-        logger.info("foley muxed video=%s", Path(video_path).name)
+        logger.info("foley muxed video=%s", video.name)
         return True
     except Exception as exc:
-        Path(video_path).with_suffix(".wav").unlink(missing_ok=True)
-        logger.exception("foley failed video=%s", video_path)
+        wav.unlink(missing_ok=True)
+        logger.exception("foley failed video=%s", video)
         if config.FOLEY_REQUIRED:
             raise FoleyError(str(exc)) from exc
         return False

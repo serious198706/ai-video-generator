@@ -50,6 +50,7 @@ _compat_py314()
 import argparse
 import json
 import traceback
+from pathlib import Path
 
 import torch
 import torch.utils as _torch_utils
@@ -116,8 +117,10 @@ def _generate(req: dict) -> dict:
     from hunyuanvideo_foley.utils.model_utils import denoise_process
     import torchaudio
 
-    video = req["video"]
-    wav = req["wav"]
+    video = str(Path(req["video"]).expanduser())
+    wav = str(Path(req["wav"]).expanduser())
+    if not Path(video).is_file():
+        raise FileNotFoundError(f"video not found: {video} cwd={Path.cwd()}")
     prompt = req.get("prompt") or ""
     neg = req.get("neg_prompt")
     steps = int(req.get("steps") or 50)

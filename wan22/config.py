@@ -9,8 +9,13 @@ def _csv(name: str, default: str = "") -> tuple[str, ...]:
     return tuple(part.strip().lower() for part in raw.split(",") if part.strip())
 
 
+def _abs(path: Path, base: Path) -> Path:
+    path = path.expanduser()
+    return path.resolve() if path.is_absolute() else (base / path).resolve()
+
+
 _SERVER_ROOT = Path(__file__).resolve().parent.parent
-ROOT = Path(os.environ.get("WAN22_DATA_DIR", _SERVER_ROOT / "data"))
+ROOT = _abs(Path(os.environ.get("WAN22_DATA_DIR", _SERVER_ROOT / "data")), _SERVER_ROOT)
 UPLOAD_DIR = ROOT / "uploads"
 OUTPUT_DIR = ROOT / "outputs"
 
