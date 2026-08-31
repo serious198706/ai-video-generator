@@ -10,17 +10,51 @@ stdin/stdout 走 JSON 行：
 from __future__ import annotations
 
 import os
+import sys
+import types
 
-# Python 3.14 + protobuf 4.x UPB 扩展会炸（Metaclasses with custom tp_new）。
-# audiotools → tensorboard → protobuf，必须在 import 那些库之前设。
-os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
+
+def _compat_py314() -> None:
+    """Python 3.14 会拒绝 protobuf UPB 的 custom tp_new。
+
+    环境变量不够：protobuf 4.x 先 import google._upb._message，失败是 TypeError
+    不是 ImportError，纯 Python 实现根本轮不到。推理也不需要 tensorboard。
+    """
+    os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+
+    class _BlockUpb:
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname in {"google._upb", "google._upb._message"}:
+                raise ImportError("protobuf UPB is incompatible with Python 3.14")
+            return None
+
+    sys.meta_path.insert(0, _BlockUpb())
+
+    dummy = types.ModuleType("torch.utils.tensorboard")
+
+    class _Writer:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: None
+
+    dummy.SummaryWriter = _Writer
+    dummy.FileWriter = _Writer
+    sys.modules["torch.utils.tensorboard"] = dummy
+    sys.modules["torch.utils.tensorboard.writer"] = dummy
+
+
+_compat_py314()
 
 import argparse
 import json
-import sys
 import traceback
 
 import torch
+import torch.utils as _torch_utils
+
+_torch_utils.tensorboard = sys.modules["torch.utils.tensorboard"]
 
 
 _NN_KEYS = (
@@ -124,7 +158,11 @@ def main() -> int:
     except Exception as exc:
         _log(f"load failed: {exc}")
         traceback.print_exc(file=sys.stderr)
-        return 1
+        try:
+            _reply({"ok": False, "ready": False, "error": str(exc)})
+        except Exception:
+            pass
+        os._exit(1)
     _reply({"ok": True, "ready": True})
     for line in sys.stdin:
         line = line.strip()

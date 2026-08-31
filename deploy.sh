@@ -106,6 +106,9 @@ skip = (
     "numpy",
     "pillow",
     "gradio",  # 3.50 锁 numpy~=1.0，sidecar 不用
+    "tensorboard",  # 会拉旧 protobuf，3.14 上 UPB 会炸
+    "tb-nightly",
+    "tensorboard-data-server",
     "black",
     "isort",
     "flake8",
@@ -135,6 +138,9 @@ PY
     --only-binary=pillow,numpy \
     -c "$FOLEY_CONSTRAINTS" \
     'pillow>=11.3' 'numpy>=2.2'
+  "$FOLEY_PY" -m pip uninstall -y tensorboard tensorboard-data-server tb-nightly || true
+  # protobuf 4.24–4.29 的 UPB 在 Python 3.14 会 TypeError；sidecar 也会挡住，这里顺手升级。
+  "$FOLEY_PY" -m pip install --upgrade 'protobuf>=5.29'
   "$FOLEY_PY" -m pip install --upgrade torch torchvision torchaudio \
     --index-url https://download.pytorch.org/whl/cu128
   "$FOLEY_PY" -m pip install --no-deps -e "$FOLEY_REPO"
