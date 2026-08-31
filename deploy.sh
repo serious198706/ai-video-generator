@@ -102,15 +102,27 @@ else
 from pathlib import Path
 import os
 src = Path(os.environ["WAN22_FOLEY_REQ_IN"]).read_text().splitlines()
+skip = (
+    "numpy",
+    "pillow",
+    "gradio",  # 3.50 锁 numpy~=1.0，sidecar 不用
+    "black",
+    "isort",
+    "flake8",
+    "mypy",
+    "pre-commit",
+    "pandas",
+    "pyarrow",
+)
 out = []
 for line in src:
-    raw = line.strip().lower()
-    if raw.startswith("numpy") or raw.startswith("pillow"):
+    raw = line.strip().lower().split("==")[0].split(">=")[0].split("~=")[0].strip()
+    if any(raw == name or raw.startswith(name + "[") for name in skip):
         continue
     out.append(line)
 Path(os.environ["WAN22_FOLEY_REQ_OUT"]).write_text("\n".join(out) + "\n")
 PY
-  echo "[wan22] Foley filtered requirements (no pillow/numpy pins):"
+  echo "[wan22] Foley filtered requirements (no pillow/numpy/gradio/dev):"
   cat "$FOLEY_REQ"
   # descript-audiotools 会再拉 pillow；不加 only-binary 就会源码编 jpeg 失败。
   "$FOLEY_PY" -m pip install \
@@ -125,8 +137,7 @@ PY
     'pillow>=11.3' 'numpy>=2.2'
   "$FOLEY_PY" -m pip install --upgrade torch torchvision torchaudio \
     --index-url https://download.pytorch.org/whl/cu128
-  "$FOLEY_PY" -m pip install --only-binary=pillow,numpy -c "$FOLEY_CONSTRAINTS" \
-    -e "$FOLEY_REPO"
+  "$FOLEY_PY" -m pip install --no-deps -e "$FOLEY_REPO"
 
   mkdir -p "$WAN22_FOLEY_MODEL_DIR"
   echo "[wan22] downloading HunyuanVideo-Foley weights"
