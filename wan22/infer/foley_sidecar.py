@@ -120,17 +120,29 @@ def _save_wav(path: str, waveform, sample_rate: int) -> None:
     tensor = waveform.detach().float().cpu()
     if tensor.ndim == 1:
         tensor = tensor.unsqueeze(0)
+    while tensor.ndim > 2:
+        tensor = tensor.squeeze(0)
     if tensor.shape[0] > tensor.shape[-1]:
         tensor = tensor.transpose(0, 1)
-    # [channels, samples] -> interleaved [samples, channels]
-    pcm = tensor.transpose(0, 1).contiguous().numpy()
-    pcm = np.clip(pcm, -1.0, 1.0)
-    frames = (pcm * 32767.0).astype("<i2")
+    pcm = tensor.transpose(0, 1).contiguous().numpy().astype(np.float32, copy=False)
+    peak = float(np.max(np.abs(pcm))) if pcm.size else 0.0
+    rms = float(np.sqrt(np.mean(np.square(pcm)))) if pcm.size else 0.0
+    if peak > 1e-4:
+        pcm = pcm * (0.89 / peak)
+    else:
+        _log(f"wav near-silent peak={peak:.6f} rms={rms:.6f} path={path}")
+    frames = np.clip(pcm, -1.0, 1.0)
+    frames = (frames * 32767.0).astype("<i2")
+    duration = frames.shape[0] / float(sample_rate) if sample_rate else 0.0
     with wave.open(path, "wb") as handle:
         handle.setnchannels(int(frames.shape[1]))
         handle.setsampwidth(2)
         handle.setframerate(int(sample_rate))
         handle.writeframes(frames.tobytes())
+    _log(
+        f"wrote wav={path} sr={int(sample_rate)} duration={duration:.2f}s "
+        f"ch={int(frames.shape[1])} peak={peak:.4f} rms={rms:.4f} peak_norm={peak > 1e-4}"
+    )
 
 
 def _generate(req: dict) -> dict:
@@ -165,7 +177,6 @@ def _generate(req: dict) -> dict:
             num_inference_steps=steps,
         )
         _save_wav(wav, audio[0], sample_rate)
-        _log(f"wrote wav={wav} sr={int(sample_rate)}")
     finally:
         _to_device(_model_dict, torch.device("cpu"))
     return {"ok": True, "wav": wav}
