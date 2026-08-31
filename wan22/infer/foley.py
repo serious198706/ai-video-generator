@@ -127,9 +127,9 @@ def _ensure() -> None:
         config.FOLEY_SIZE,
     ]
     logger.info("starting foley sidecar: %s", " ".join(cmd))
-    env = None
+    env = os.environ.copy()
+    env["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
     if config.FOLEY_REPO:
-        env = os.environ.copy()
         repo = str(config.FOLEY_REPO)
         env["PYTHONPATH"] = repo + os.pathsep + env.get("PYTHONPATH", "")
     _proc = subprocess.Popen(

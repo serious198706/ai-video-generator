@@ -9,6 +9,12 @@ stdin/stdout 走 JSON 行：
 
 from __future__ import annotations
 
+import os
+
+# Python 3.14 + protobuf 4.x UPB 扩展会炸（Metaclasses with custom tp_new）。
+# audiotools → tensorboard → protobuf，必须在 import 那些库之前设。
+os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
+
 import argparse
 import json
 import sys
