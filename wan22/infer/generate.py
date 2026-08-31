@@ -363,6 +363,58 @@ def resume_gpu() -> None:
         _log_memory("wan on cuda")
 
 
+def _boundary_timestep(pipe):
+    ratio = getattr(pipe.config, "boundary_ratio", None)
+    if ratio is None:
+        return None
+    return float(ratio) * float(pipe.scheduler.config.num_train_timesteps)
+
+
+def _place_experts(pipe, timestep, boundary) -> str:
+    """单卡 44GB：同一时刻只把当前 expert 放在 GPU。"""
+    import torch
+
+    need_high = boundary is None or float(timestep) >= float(boundary)
+    active = "transformer" if need_high else "transformer_2"
+    idle = "transformer_2" if need_high else "transformer"
+    getattr(pipe, active).to("cuda")
+    other = getattr(pipe, idle, None)
+    if other is not None:
+        other.to("cpu")
+    torch.cuda.empty_cache()
+    return active
+
+
+def _stage_experts(pipe, num_frames: int):
+    """长视频激活显存大，高/低噪声 transformer 分时上卡。"""
+    import gc
+    import torch
+
+    gc.collect()
+    torch.cuda.empty_cache()
+    if num_frames <= 81 or getattr(pipe, "transformer_2", None) is None:
+        return None
+
+    boundary = _boundary_timestep(pipe)
+    active = _place_experts(pipe, 1e9, boundary)
+    logger.info(
+        "expert ping-pong start=%s boundary=%s frames=%s",
+        active,
+        boundary,
+        num_frames,
+    )
+
+    def _on_step_end(pipeline, step_index, timestep, callback_kwargs):
+        timesteps = pipeline.scheduler.timesteps
+        nxt = step_index + 1
+        if nxt < len(timesteps):
+            name = _place_experts(pipeline, timesteps[nxt], boundary)
+            logger.info("expert swap step=%s next=%s", step_index + 1, name)
+        return callback_kwargs
+
+    return _on_step_end
+
+
 def _snap_frames(seconds: float) -> int:
     """复刻参考 Space 的向下吸附规则；5 秒请求得到 77 帧。"""
     raw = max(9, round(float(seconds) * config.FPS))
@@ -494,7 +546,17 @@ def generate_video(
     if last_image is not None:
         kwargs["last_image"] = last_image
 
-    frames = pipe(**kwargs).frames[0]
+    on_step_end = _stage_experts(pipe, num_frames)
+    if on_step_end is not None:
+        kwargs["callback_on_step_end"] = on_step_end
+    try:
+        frames = pipe(**kwargs).frames[0]
+    finally:
+        if on_step_end is not None:
+            try:
+                pipe.to("cuda")
+            except Exception:
+                logger.exception("restore pipeline to cuda failed")
     export_to_video(
         frames,
         output_path,
