@@ -50,6 +50,7 @@ _compat_py314()
 import argparse
 import json
 import traceback
+import wave
 from pathlib import Path
 
 import torch
@@ -112,10 +113,29 @@ def _load(args) -> None:
     _log("foley ready on cpu")
 
 
+def _save_wav(path: str, waveform, sample_rate: int) -> None:
+    """不走 torchaudio.save：新版会强制 torchcodec，Foley venv 里没有。"""
+    import numpy as np
+
+    tensor = waveform.detach().float().cpu()
+    if tensor.ndim == 1:
+        tensor = tensor.unsqueeze(0)
+    if tensor.shape[0] > tensor.shape[-1]:
+        tensor = tensor.transpose(0, 1)
+    # [channels, samples] -> interleaved [samples, channels]
+    pcm = tensor.transpose(0, 1).contiguous().numpy()
+    pcm = np.clip(pcm, -1.0, 1.0)
+    frames = (pcm * 32767.0).astype("<i2")
+    with wave.open(path, "wb") as handle:
+        handle.setnchannels(int(frames.shape[1]))
+        handle.setsampwidth(2)
+        handle.setframerate(int(sample_rate))
+        handle.writeframes(frames.tobytes())
+
+
 def _generate(req: dict) -> dict:
     from hunyuanvideo_foley.utils.feature_utils import feature_process
     from hunyuanvideo_foley.utils.model_utils import denoise_process
-    import torchaudio
 
     video = str(Path(req["video"]).expanduser())
     wav = str(Path(req["wav"]).expanduser())
@@ -144,7 +164,8 @@ def _generate(req: dict) -> dict:
             guidance_scale=guidance,
             num_inference_steps=steps,
         )
-        torchaudio.save(wav, audio[0], sample_rate)
+        _save_wav(wav, audio[0], sample_rate)
+        _log(f"wrote wav={wav} sr={int(sample_rate)}")
     finally:
         _to_device(_model_dict, torch.device("cpu"))
     return {"ok": True, "wav": wav}
