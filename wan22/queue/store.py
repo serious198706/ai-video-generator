@@ -95,7 +95,7 @@ def client() -> sqlite3.Connection:
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_tasks_queue "
-            "ON tasks(in_queue, created_at, rowid) WHERE in_queue=1"
+            "ON tasks(created_at) WHERE in_queue=1"
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)"
