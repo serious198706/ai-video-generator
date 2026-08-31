@@ -85,15 +85,35 @@ else
     python3 -m venv "$FOLEY_VENV_DIR"
   fi
 
-  echo "[wan22] installing Foley dependencies (separate venv)"
-  "$FOLEY_VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel
-  "$FOLEY_VENV_DIR/bin/python" -m pip install --upgrade torch torchvision torchaudio \
+  FOLEY_PY="$FOLEY_VENV_DIR/bin/python"
+  echo "[wan22] installing Foley dependencies (separate venv, keep existing interpreter)"
+  "$FOLEY_PY" -m pip install --upgrade pip setuptools wheel
+  "$FOLEY_PY" -m pip install --upgrade torch torchvision torchaudio \
     --index-url https://download.pytorch.org/whl/cu128
-  "$FOLEY_VENV_DIR/bin/python" -m pip install --upgrade -r "$FOLEY_REPO/requirements.txt"
+  # 3.14 没有旧 pillow / numpy==1.26 的轮子，禁止走源码编。不重建 venv。
+  echo "[wan22] Foley: binary pillow/numpy (skip jpeg source build)"
+  "$FOLEY_PY" -m pip install --upgrade --only-binary=:all: 'pillow>=11.3' 'numpy>=2.2'
+  FOLEY_REQ="$(mktemp)"
+  WAN22_FOLEY_REQ_IN="$FOLEY_REPO/requirements.txt" WAN22_FOLEY_REQ_OUT="$FOLEY_REQ" \
+    "$FOLEY_PY" - <<'PY'
+from pathlib import Path
+import os
+src = Path(os.environ["WAN22_FOLEY_REQ_IN"]).read_text().splitlines()
+out = []
+for line in src:
+    raw = line.strip().lower()
+    if raw.startswith("numpy") or raw.startswith("pillow"):
+        continue
+    out.append(line)
+Path(os.environ["WAN22_FOLEY_REQ_OUT"]).write_text("\n".join(out) + "\n")
+PY
+  "$FOLEY_PY" -m pip install --upgrade -r "$FOLEY_REQ"
+  rm -f "$FOLEY_REQ"
+  "$FOLEY_PY" -m pip install --upgrade --only-binary=:all: 'pillow>=11.3' 'numpy>=2.2'
   # requirements.txt 可能把 torch 装成 CPU 轮，再钉回 cu128
-  "$FOLEY_VENV_DIR/bin/python" -m pip install --upgrade torch torchvision torchaudio \
+  "$FOLEY_PY" -m pip install --upgrade torch torchvision torchaudio \
     --index-url https://download.pytorch.org/whl/cu128
-  "$FOLEY_VENV_DIR/bin/python" -m pip install -e "$FOLEY_REPO"
+  "$FOLEY_PY" -m pip install -e "$FOLEY_REPO"
 
   mkdir -p "$WAN22_FOLEY_MODEL_DIR"
   echo "[wan22] downloading HunyuanVideo-Foley weights"

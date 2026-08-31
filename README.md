@@ -84,7 +84,7 @@ cp .env.example .env
 ./start.sh
 ```
 
-`deploy.sh` 会装 Wan venv、WAMU 权重，以及独立的 Foley venv（`/opt/foley-venv`）和 HunyuanVideo-Foley XL 权重。只要 Foley 的 python 在，`start.sh` 默认打开配音。不要 Foley：`.env` 里 `WAN22_FOLEY_ENABLE=0`，或 `WAN22_FOLEY_SKIP=1 ./deploy.sh`。
+`deploy.sh` 会装 Wan venv、WAMU 权重，以及独立的 Foley venv（`/opt/foley-venv`）和 HunyuanVideo-Foley XL 权重。Foley 沿用已有解释器，不重建 venv；3.14 上会改用带轮子的 Pillow / NumPy，避免源码编译。只要 Foley 的 python 在，`start.sh` 默认打开配音。不要 Foley：`.env` 里 `WAN22_FOLEY_ENABLE=0`，或 `WAN22_FOLEY_SKIP=1 ./deploy.sh`。
 
 无 GPU 联调：
 
