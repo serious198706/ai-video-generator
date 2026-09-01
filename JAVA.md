@@ -1,6 +1,6 @@
-内网图生视频，无鉴权。Base URL 示例：`http://172.31.83.168:8000`
+内网图生视频，无鉴权。Base URL 用 **API Gateway**（不要再打 GPU `:8000`）。
 
-可空字段 JSON 里是 `null`（不要用缺 key 判断）。数字不要加引号。`POST /v1/generate` 入队前会下载首帧，超时建议 ≥ 30s。单卡串行，不要同步死等成片。
+可空字段 JSON 里是 `null`（不要用缺 key 判断）。数字不要加引号。`POST /v1/generate` **只校验 URL 并入 Redis 队列，不下图**，超时可以比 30s 短。单卡串行，不要同步死等成片。
 
 ---
 
@@ -16,7 +16,7 @@ Content-Type: application/json
 
 | 字段名 | 类型 | 必须 | 说明 |
 | --- | --- | --- | --- |
-| image | string | 是 | 首帧 HTTPS URL，公网图（已加白名单的 CloudFront 等），服务端下载。不要传 base64 / multipart |
+| image | string | 是 | 首帧 HTTPS URL，公网图（已加白名单的 CloudFront 等）。接口只校验，GPU 出队后再下载。不要传 base64 / multipart |
 | prompt | string | 否 | 空或省略则用服务端默认提示词 |
 | negativePrompt | string | 否 | 会传给模型 |
 | duration | number | 否 | 秒，`(0, 15]`，默认 5。可写 5 或 5.0 |
@@ -72,10 +72,10 @@ Content-Type: application/json
 
 | HTTP | 说明 |
 | --- | --- |
-| 400 | 图 / webhook URL 不合法：非 https、host 不在白名单、图解析到私网、下载失败 |
+| 400 | 图 / webhook URL 不合法：非 https、host 不在白名单、图解析到私网 |
 | 422 | 字段类型或范围不对（duration 超 15、resolution 不是那三个枚举等） |
-| 429 | 队列满（排队 + 正在跑 ≥ 上限） |
-| 503 | 模型未就绪，或入队失败 |
+| 429 | 排队 List ≥ 500（正在跑的不算进这 500） |
+| 503 | Redis 不可用或入队失败 |
 
 ---
 
@@ -124,11 +124,11 @@ error 短码（不要当给人看的长文案）：
 
 | 值 | 说明 |
 | --- | --- |
-| generate_failed | 推理失败 |
+| generate_failed | 推理失败（含重试仍失败） |
 | foley_failed | 成片后配 Foley 失败（仅 `WAN22_FOLEY_REQUIRED=1`） |
 | upload_failed | 成片上传 S3 失败 |
-| download_failed | worker 补下图失败 |
-| interrupted | 进程重启时这条正在跑，被标失败 |
+| download_failed | GPU 下图失败 |
+| interrupted | 进程重启后重试仍失败（最多 3 次，含首次） |
 
 返回示例：
 
@@ -206,34 +206,20 @@ Header：
 
 探活
 
-健康检查
+健康检查（API Gateway / Lambda）
 
 请求
 - url: `/health`
 - method: GET
 
 返回
-- HTTP 200（进程活着即 200；`model_ready=false` 时不要提交）
-
-字段说明：
-
-| 字段名 | 类型 | 必须 | 说明 |
-| --- | --- | --- | --- |
-| ok | boolean | 是 | |
-| model_ready | boolean | 是 | 模型是否已加载 |
-
-就绪检查
-
-请求
-- url: `/ready`
-- method: GET
-
-返回
-- HTTP 200：模型已就绪
-- HTTP 503：模型未加载完，适合等预热
+- HTTP 200：能连上 Redis
+- HTTP 503：Redis 不可用
 
 字段说明（200）：
 
 | 字段名 | 类型 | 必须 | 说明 |
 | --- | --- | --- | --- |
 | ok | boolean | 是 | |
+
+GPU 本机还有 `/health`、`/ready`（模型是否已加载），**不要走 Java 主路径**，只给运维。

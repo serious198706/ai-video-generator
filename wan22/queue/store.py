@@ -1,12 +1,19 @@
 from __future__ import annotations
 
-import sqlite3
-import threading
+import json
+import socket
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
+import redis
+
 from wan22 import config
+
+# ElastiCache Serverless 按 Cluster slot 校验 MULTI。{wan22} 让 queue / task 同槽。
+QUEUE_KEY = "{wan22}:queue"
+TASK_PREFIX = "{wan22}:task:"
 
 _OPTIONAL = (
     "negative_prompt",
@@ -21,100 +28,47 @@ _OPTIONAL = (
     "quality",
     "video_url",
     "error",
+    "worker_id",
 )
 
-_UPDATABLE = frozenset(
-    {
-        "status",
-        "prompt",
-        "negative_prompt",
-        "image_url",
-        "last_image_url",
-        "first_frame_path",
-        "last_frame_path",
-        "duration",
-        "resolution",
-        "webhook_url",
-        "seed",
-        "steps",
-        "quality",
-        "video_url",
-        "error",
-        "audio",
-        "in_queue",
-    }
-)
-
-_lock = threading.Lock()
-_conn: sqlite3.Connection | None = None
+_client: redis.Redis | None = None
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def client() -> sqlite3.Connection:
-    global _conn
-    if _conn is None:
-        path = config.QUEUE_DB
-        path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(
-            str(path),
-            timeout=30,
-            check_same_thread=False,
-            isolation_level=None,
+def _worker_id() -> str:
+    return getattr(config, "WORKER_ID", None) or f"{socket.gethostname()}"
+
+
+def _running_file() -> Path:
+    safe = "".join(ch if ch.isalnum() or ch in ".-" else "_" for ch in _worker_id())
+    return config.ROOT / f"worker-running.{safe}"
+
+
+def client() -> redis.Redis:
+    global _client
+    if _client is None:
+        # Serverless TLS 会掐空闲连接。LPOP 非阻塞，必须设 socket_timeout，
+        # 否则成片几十秒没人碰 Redis，下一次 GET/SET 会永远卡住。
+        _client = redis.Redis.from_url(
+            config.REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=3,
+            socket_timeout=3,
+            socket_keepalive=True,
+            health_check_interval=30,
+            # 单次命令不要内部再重试：5s×2 会吃光 Lambda 10s，日志只剩 timeout。
+            retry_on_timeout=False,
         )
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=30000")
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS tasks (
-                id TEXT PRIMARY KEY,
-                status TEXT NOT NULL,
-                prompt TEXT,
-                negative_prompt TEXT,
-                image_url TEXT,
-                last_image_url TEXT,
-                first_frame_path TEXT,
-                last_frame_path TEXT,
-                duration REAL,
-                resolution TEXT,
-                webhook_url TEXT,
-                seed INTEGER,
-                steps INTEGER,
-                quality INTEGER,
-                video_url TEXT,
-                error TEXT,
-                audio INTEGER NOT NULL DEFAULT 1,
-                in_queue INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_tasks_queue "
-            "ON tasks(created_at) WHERE in_queue=1"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)"
-        )
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
-        if "audio" not in cols:
-            conn.execute(
-                "ALTER TABLE tasks ADD COLUMN audio INTEGER NOT NULL DEFAULT 1"
-            )
-        _conn = conn
-    return _conn
+    return _client
 
 
 def reset_client() -> None:
-    global _conn
-    old = _conn
-    _conn = None
+    global _client
+    old = _client
+    _client = None
     if old is None:
         return
     try:
@@ -124,155 +78,170 @@ def reset_client() -> None:
 
 
 def ping() -> None:
-    with _lock:
-        client().execute("SELECT 1").fetchone()
+    """只 ping 一次。失败原样抛出，避免卡到 Lambda 超时却没有任何错误日志。"""
+    client().ping()
 
 
-def _audio_int(value: Any) -> int:
-    if value is None or value == "":
-        return 1
-    return 1 if bool(value) else 0
+def _retry(op):
+    try:
+        return op()
+    except (redis.TimeoutError, redis.ConnectionError, OSError):
+        reset_client()
+        return op()
 
 
-def _dump(value: Any) -> Any:
-    if value is None or value == "":
+def task_key(task_id: str) -> str:
+    return f"{TASK_PREFIX}{task_id}"
+
+
+def _load(raw: str | None) -> dict[str, Any] | None:
+    if not raw:
         return None
-    return value
-
-
-def _load(row: sqlite3.Row | None) -> dict[str, Any] | None:
-    if row is None:
-        return None
-    task: dict[str, Any] = {key: row[key] for key in row.keys() if key != "in_queue"}
+    task = json.loads(raw)
     if task.get("duration") is not None:
         task["duration"] = float(task["duration"])
-    for key in ("seed", "steps", "quality"):
-        if task.get(key) is not None:
+    for key in ("seed", "steps", "quality", "attempts"):
+        if task.get(key) is not None and task.get(key) != "":
             task[key] = int(task[key])
+        elif key == "attempts":
+            task[key] = 0
     if "audio" in task:
-        task["audio"] = bool(task["audio"]) if task["audio"] is not None else True
+        task["audio"] = True if task["audio"] is None else bool(task["audio"])
     else:
         task["audio"] = True
     for key in _OPTIONAL:
-        if task.get(key) == "":
+        if task.get(key) in ("",):
             task[key] = None
     return task
 
 
+def _dump_task(task: dict[str, Any]) -> str:
+    return json.dumps(task, ensure_ascii=False, default=str)
+
+
 def create_task(task_id: str, fields: dict[str, Any]) -> dict[str, Any]:
     now = _now()
-    with _lock:
-        client().execute(
-            """
-            INSERT INTO tasks (
-                id, status, prompt, negative_prompt, image_url, last_image_url,
-                first_frame_path, last_frame_path, duration, resolution, webhook_url,
-                seed, steps, quality, video_url, error, audio, in_queue, created_at, updated_at
-            ) VALUES (
-                ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, 1, ?, ?
-            )
-            """,
-            (
-                task_id,
-                _dump(fields.get("prompt")),
-                _dump(fields.get("negative_prompt")),
-                _dump(fields.get("image_url")),
-                _dump(fields.get("last_image_url")),
-                _dump(fields.get("first_frame_path")),
-                _dump(fields.get("last_frame_path")),
-                _dump(fields.get("duration")),
-                _dump(fields.get("resolution")),
-                _dump(fields.get("webhook_url")),
-                _dump(fields.get("seed")),
-                _dump(fields.get("steps")),
-                _dump(fields.get("quality")),
-                _audio_int(fields.get("audio")),
-                now,
-                now,
-            ),
-        )
+    payload = {
+        "id": task_id,
+        "status": "queued",
+        "attempts": 0,
+        "created_at": now,
+        "updated_at": now,
+        "worker_id": None,
+        "prompt": fields.get("prompt"),
+        "negative_prompt": fields.get("negative_prompt"),
+        "image_url": fields.get("image_url"),
+        "last_image_url": fields.get("last_image_url"),
+        "first_frame_path": fields.get("first_frame_path"),
+        "last_frame_path": fields.get("last_frame_path"),
+        "duration": fields.get("duration"),
+        "resolution": fields.get("resolution"),
+        "webhook_url": fields.get("webhook_url"),
+        "seed": fields.get("seed"),
+        "steps": fields.get("steps"),
+        "quality": fields.get("quality"),
+        "audio": True if fields.get("audio") is None else bool(fields.get("audio")),
+        "video_url": None,
+        "error": None,
+    }
+
+    def _create() -> None:
+        pipe = client().pipeline()
+        pipe.set(task_key(task_id), _dump_task(payload))
+        pipe.rpush(QUEUE_KEY, task_id)
+        pipe.execute()
+
+    _retry(_create)
     return get_task(task_id)  # type: ignore[return-value]
 
 
 def update_task(task_id: str, **fields: Any) -> None:
-    payload = {key: _dump(value) for key, value in fields.items() if key in _UPDATABLE}
-    if not payload:
+    if not fields:
         return
-    payload["updated_at"] = _now()
-    assignments = ", ".join(f"{key}=?" for key in payload)
-    values = list(payload.values())
-    values.append(task_id)
-    with _lock:
-        client().execute(
-            f"UPDATE tasks SET {assignments} WHERE id=?",
-            values,
-        )
+
+    def _update() -> None:
+        raw = client().get(task_key(task_id))
+        task = _load(raw)
+        if not task:
+            return
+        for key, value in fields.items():
+            if value == "":
+                value = None
+            task[key] = value
+        task["updated_at"] = _now()
+        client().set(task_key(task_id), _dump_task(task))
+
+    _retry(_update)
 
 
 def get_task(task_id: str) -> dict[str, Any] | None:
-    with _lock:
-        row = client().execute(
-            "SELECT * FROM tasks WHERE id=?",
-            (task_id,),
-        ).fetchone()
-    return _load(row)
+    raw = _retry(lambda: client().get(task_key(task_id)))
+    return _load(raw)
 
 
 def pending() -> int:
-    with _lock:
-        row = client().execute(
-            """
-            SELECT COUNT(*) AS n FROM tasks
-            WHERE (status='queued' AND in_queue=1) OR status='running'
-            """
-        ).fetchone()
-    return int(row["n"] if row else 0)
+    return int(_retry(lambda: client().llen(QUEUE_KEY)) or 0)
 
 
 def pop_task(timeout: int = 5) -> str | None:
+    """RPUSH + LPOP。Serverless 上 BRPOP 会被 TLS 读超时打死。LPOP 即抢锁。"""
     deadline = time.monotonic() + max(timeout, 0)
     while True:
-        with _lock:
-            conn = client()
-            row = conn.execute(
-                """
-                SELECT id FROM tasks
-                WHERE status='queued' AND in_queue=1
-                ORDER BY created_at, rowid
-                LIMIT 1
-                """
-            ).fetchone()
-            if row is not None:
-                task_id = row["id"]
-                updated = conn.execute(
-                    "UPDATE tasks SET in_queue=0 WHERE id=? AND in_queue=1",
-                    (task_id,),
-                )
-                if updated.rowcount == 1:
-                    return task_id
+        try:
+            item = client().lpop(QUEUE_KEY)
+        except (redis.TimeoutError, redis.ConnectionError, OSError):
+            reset_client()
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.25)
+            continue
+        if item is not None:
+            return item
         if time.monotonic() >= deadline:
             return None
         time.sleep(0.25)
 
 
 def set_running(task_id: str) -> None:
-    update_task(task_id, status="running", error=None)
+    _running_file().write_text(task_id, encoding="utf-8")
+    update_task(task_id, status="running", error=None, worker_id=_worker_id())
 
 
 def clear_running(task_id: str | None = None) -> None:
-    # 状态已在 succeeded/failed 里落库；SQLite 不另存 running key。
-    return
+    path = _running_file()
+    if not path.is_file():
+        return
+    current = path.read_text(encoding="utf-8").strip()
+    if task_id is None or current == task_id:
+        path.unlink(missing_ok=True)
 
 
 def take_interrupted() -> str | None:
-    """启动时取走残留 running。"""
-    with _lock:
-        row = client().execute(
-            """
-            SELECT id FROM tasks
-            WHERE status='running'
-            ORDER BY updated_at, rowid
-            LIMIT 1
-            """
-        ).fetchone()
-    return row["id"] if row else None
+    """本机上次没跑完的 running。不抢其它机器的任务。"""
+    path = _running_file()
+    if not path.is_file():
+        return None
+    task_id = path.read_text(encoding="utf-8").strip()
+    path.unlink(missing_ok=True)
+    return task_id or None
+
+
+def requeue(task_id: str, *, attempts: int, error: str | None = None) -> None:
+    """失败未超限：写回 queued 并 RPUSH。"""
+
+    def _requeue() -> None:
+        raw = client().get(task_key(task_id))
+        task = _load(raw)
+        if not task:
+            return
+        task["status"] = "queued"
+        task["attempts"] = attempts
+        task["error"] = error
+        task["worker_id"] = None
+        task["updated_at"] = _now()
+        pipe = client().pipeline()
+        pipe.set(task_key(task_id), _dump_task(task))
+        pipe.rpush(QUEUE_KEY, task_id)
+        pipe.execute()
+
+    _retry(_requeue)

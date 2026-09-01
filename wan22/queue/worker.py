@@ -30,24 +30,34 @@ def start() -> None:
         _started = True
 
 
-def _recover_interrupted() -> None:
+def run_forever() -> None:
+    """前台跑 worker，进程不退出。start.sh 用这个，不再对外接单。"""
+    start()
     while True:
-        task_id = store.take_interrupted()
-        if not task_id:
-            return
-        task = store.get_task(task_id)
-        if not task or task.get("status") != "running":
-            logger.info(
-                "cleared stale running key task=%s status=%s",
-                task_id,
-                (task or {}).get("status"),
-            )
-            return
-        store.update_task(task_id, status="failed", error="interrupted")
-        updated = store.get_task(task_id)
-        if updated:
-            webhook.notify(updated)
-        logger.warning("interrupted running task=%s", task_id)
+        time.sleep(3600)
+
+
+def _recover_interrupted() -> None:
+    task_id = store.take_interrupted()
+    if not task_id:
+        return
+    task = store.get_task(task_id)
+    if not task or task.get("status") != "running":
+        logger.info(
+            "cleared stale running key task=%s status=%s",
+            task_id,
+            (task or {}).get("status"),
+        )
+        return
+    if task.get("worker_id") and task.get("worker_id") != config.WORKER_ID:
+        logger.info(
+            "skip foreign running task=%s worker=%s",
+            task_id,
+            task.get("worker_id"),
+        )
+        return
+    logger.warning("requeue interrupted running task=%s", task_id)
+    _fail_or_retry(task_id, "interrupted")
 
 
 def _loop() -> None:
@@ -70,7 +80,7 @@ def _loop() -> None:
             _run(task_id)
         except Exception:
             logger.exception("worker crashed task=%s", task_id)
-            _finish(task_id, status="failed", error="generate_failed")
+            _fail_or_retry(task_id, "generate_failed")
             store.clear_running(task_id)
 
 
@@ -85,14 +95,14 @@ def _run(task_id: str) -> None:
     last_path = task.get("last_frame_path")
     started = time.monotonic()
     store.set_running(task_id)
-    store.update_task(task_id, status="running", error=None)
     logger.info(
-        "running task=%s duration=%s resolution=%s steps=%s audio=%s",
+        "running task=%s duration=%s resolution=%s steps=%s audio=%s attempt=%s",
         task_id,
         task.get("duration"),
         task.get("resolution"),
         task.get("steps"),
         bool(task.get("audio", True)),
+        int(task.get("attempts") or 0) + 1,
     )
     try:
         first_path = _ensure_image(task, "first")
@@ -123,7 +133,7 @@ def _run(task_id: str) -> None:
                 total_s=time.monotonic() - gen_started,
                 generate_s=time.monotonic() - gen_started,
             )
-            _finish(task_id, status="failed", error="generate_failed")
+            _fail_or_retry(task_id, "generate_failed")
             return
         generate_s = time.monotonic() - gen_started
 
@@ -150,7 +160,7 @@ def _run(task_id: str) -> None:
                     foley_s=foley_s,
                     foley_ok=0,
                 )
-                _finish(task_id, status="failed", error="foley_failed")
+                _fail_or_retry(task_id, "foley_failed")
                 return
 
         upload_t = time.monotonic()
@@ -173,7 +183,7 @@ def _run(task_id: str) -> None:
                 upload_s=time.monotonic() - upload_t,
                 foley_ok=foley_ok,
             )
-            _finish(task_id, status="failed", error="upload_failed")
+            _fail_or_retry(task_id, "upload_failed")
             return
         upload_s = time.monotonic() - upload_t
         total_s = time.monotonic() - gen_started
@@ -196,16 +206,14 @@ def _run(task_id: str) -> None:
             wall_s,
             video_url,
         )
-        _finish(
+        _succeed(
             task_id,
-            status="succeeded",
-            error=None,
             seed=used_seed,
             video_url=video_url,
         )
     except UrlError:
         logger.exception("download failed task=%s", task_id)
-        _finish(task_id, status="failed", error="download_failed")
+        _fail_or_retry(task_id, "download_failed")
     finally:
         _remove(first_path, last_path, output)
         store.clear_running(task_id)
@@ -271,11 +279,38 @@ def _log_timing(
     logger.info("timing %s", " ".join(fields))
 
 
-def _finish(task_id: str, **fields) -> None:
-    store.update_task(task_id, **fields)
+def _succeed(task_id: str, **fields) -> None:
+    store.update_task(task_id, status="succeeded", error=None, **fields)
     task = store.get_task(task_id)
     if task:
         webhook.notify(task)
+
+
+def _fail_or_retry(task_id: str, error: str) -> None:
+    task = store.get_task(task_id)
+    if not task:
+        return
+    attempts = int(task.get("attempts") or 0) + 1
+    if attempts >= config.MAX_ATTEMPTS:
+        store.update_task(task_id, status="failed", error=error, attempts=attempts, worker_id=None)
+        updated = store.get_task(task_id)
+        if updated:
+            webhook.notify(updated)
+        logger.warning(
+            "failed task=%s error=%s attempts=%s",
+            task_id,
+            error,
+            attempts,
+        )
+        return
+    store.requeue(task_id, attempts=attempts, error=None)
+    logger.warning(
+        "requeue task=%s error=%s attempts=%s/%s",
+        task_id,
+        error,
+        attempts,
+        config.MAX_ATTEMPTS,
+    )
 
 
 def _remove(*paths: str | None) -> None:

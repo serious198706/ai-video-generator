@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import socket
 from pathlib import Path
 
 
@@ -15,7 +16,10 @@ def _abs(path: Path, base: Path) -> Path:
 
 
 _SERVER_ROOT = Path(__file__).resolve().parent.parent
-ROOT = _abs(Path(os.environ.get("WAN22_DATA_DIR", _SERVER_ROOT / "data")), _SERVER_ROOT)
+if os.environ.get("AWS_LAMBDA_FUNCTION_NAME") and not os.environ.get("WAN22_DATA_DIR"):
+    ROOT = Path("/tmp/wan22")
+else:
+    ROOT = _abs(Path(os.environ.get("WAN22_DATA_DIR", _SERVER_ROOT / "data")), _SERVER_ROOT)
 UPLOAD_DIR = ROOT / "uploads"
 OUTPUT_DIR = ROOT / "outputs"
 
@@ -61,8 +65,10 @@ S3_PREFIX = os.environ.get("WAN22_S3_PREFIX", "wan22/")
 S3_PUBLIC_BASE_URL = os.environ.get("WAN22_S3_PUBLIC_BASE_URL", "").rstrip("/")
 S3_ENDPOINT = os.environ.get("WAN22_S3_ENDPOINT", "")
 
-QUEUE_DB = _abs(Path(os.environ.get("WAN22_QUEUE_DB", str(ROOT / "queue.sqlite"))), ROOT)
-QUEUE_MAX = int(os.environ.get("WAN22_QUEUE_MAX", "50"))
+REDIS_URL = os.environ.get("WAN22_REDIS_URL", "redis://127.0.0.1:6379/0")
+QUEUE_MAX = int(os.environ.get("WAN22_QUEUE_MAX", "500"))
+MAX_ATTEMPTS = int(os.environ.get("WAN22_MAX_ATTEMPTS", "3"))
+WORKER_ID = os.environ.get("WAN22_WORKER_ID") or socket.gethostname()
 UPLOAD_MAX_BYTES = int(os.environ.get("WAN22_UPLOAD_MAX_BYTES", str(10 * 1024 * 1024)))
 ENABLE_DOCS = os.environ.get("WAN22_DOCS", "0") == "1"
 IMAGE_HOSTS = _csv("WAN22_IMAGE_HOSTS")
@@ -72,7 +78,12 @@ DOWNLOAD_TIMEOUT = int(os.environ.get("WAN22_DOWNLOAD_TIMEOUT", "30"))
 WEBHOOK_TIMEOUT = float(os.environ.get("WAN22_WEBHOOK_TIMEOUT", "5"))
 WEBHOOK_RETRIES = int(os.environ.get("WAN22_WEBHOOK_RETRIES", "3"))
 
-LOG_DIR = os.environ.get("WAN22_LOG_DIR", str(_SERVER_ROOT / "logs"))
+if os.environ.get("WAN22_LOG_DIR"):
+    LOG_DIR = os.environ["WAN22_LOG_DIR"]
+elif os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
+    LOG_DIR = "/tmp/wan22-logs"
+else:
+    LOG_DIR = str(_SERVER_ROOT / "logs")
 LOG_LEVEL = os.environ.get("WAN22_LOG_LEVEL", "INFO").upper()
 LOG_BACKUP_DAYS = int(os.environ.get("WAN22_LOG_BACKUP_DAYS", "30"))
 LOG_CONSOLE = os.environ.get("WAN22_LOG_CONSOLE", "1") == "1"

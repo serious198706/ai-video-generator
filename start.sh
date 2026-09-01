@@ -10,6 +10,11 @@ if [[ -f .env ]]; then
   set +a
 fi
 
+if [[ -z "${WAN22_REDIS_URL:-}" ]]; then
+  echo "[wan22] 请在 .env 里设置 WAN22_REDIS_URL（ElastiCache 用 rediss://）" >&2
+  exit 1
+fi
+
 export HF_HOME="${HF_HOME:-/data/hf-cache}"
 export MODEL_ROOT="${MODEL_ROOT:-/data/models/wan22}"
 export WAN22_MODEL_DIR="${WAN22_MODEL_DIR:-$MODEL_ROOT/base/WAMU_v3_WAN2.2_I2V_LIGHTNING}"
@@ -77,7 +82,8 @@ if [[ "${WAN22_DRY_RUN:-0}" != "1" ]]; then
   python3 -c "from wan22.infer.generate import preflight; preflight(); print('[wan22] preflight OK')"
 fi
 
-echo "[wan22] starting FastAPI service"
+# GPU 只推理：worker LPOP Redis。本机 /health /ready 给运维，不给 Java 接单。
+echo "[wan22] starting GPU worker"
 exec uvicorn wan22.api.app:app \
-  --host "${WAN22_HOST:-0.0.0.0}" \
+  --host "${WAN22_HOST:-127.0.0.1}" \
   --port "${WAN22_PORT:-8000}"
