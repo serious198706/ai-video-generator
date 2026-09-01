@@ -105,10 +105,7 @@ def _load(raw: str | None) -> dict[str, Any] | None:
             task[key] = int(task[key])
         elif key == "attempts":
             task[key] = 0
-    if "audio" in task:
-        task["audio"] = True if task["audio"] is None else bool(task["audio"])
-    else:
-        task["audio"] = True
+    task["audio"] = bool(task.get("audio"))
     for key in _OPTIONAL:
         if task.get(key) in ("",):
             task[key] = None
@@ -140,7 +137,7 @@ def create_task(task_id: str, fields: dict[str, Any]) -> dict[str, Any]:
         "seed": fields.get("seed"),
         "steps": fields.get("steps"),
         "quality": fields.get("quality"),
-        "audio": True if fields.get("audio") is None else bool(fields.get("audio")),
+        "audio": bool(fields.get("audio")),
         "video_url": None,
         "error": None,
     }

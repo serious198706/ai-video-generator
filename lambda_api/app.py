@@ -52,7 +52,7 @@ def _public_task(task: dict) -> dict:
         "seed": task.get("seed"),
         "video_url": task.get("video_url"),
         "error": task.get("error"),
-        "audio": bool(task.get("audio", True)),
+        "audio": bool(task.get("audio")),
         "created_at": task["created_at"],
         "updated_at": task["updated_at"],
     }
@@ -110,7 +110,7 @@ def create_generation(body: GenerateRequest):
                 "seed": body.seed,
                 "steps": body.steps,
                 "quality": body.quality,
-                "audio": True if body.audio is None else bool(body.audio),
+                "audio": bool(body.audio),
             },
         )
     except Exception:
@@ -124,7 +124,7 @@ def create_generation(body: GenerateRequest):
         body.resolution,
         body.steps,
         body.quality,
-        True if body.audio is None else bool(body.audio),
+        bool(body.audio),
         pending + 1,
         bool(body.webhook_url),
     )

@@ -101,7 +101,7 @@ def _run(task_id: str) -> None:
         task.get("duration"),
         task.get("resolution"),
         task.get("steps"),
-        bool(task.get("audio", True)),
+        bool(task.get("audio")),
         int(task.get("attempts") or 0) + 1,
     )
     try:
@@ -137,7 +137,7 @@ def _run(task_id: str) -> None:
             return
         generate_s = time.monotonic() - gen_started
 
-        if config.FOLEY_ENABLE and not config.DRY_RUN and bool(task.get("audio", True)):
+        if config.FOLEY_ENABLE and not config.DRY_RUN and bool(task.get("audio")):
             foley_failed = False
             foley_t = time.monotonic()
             try:
@@ -251,7 +251,7 @@ def _log_timing(
     quality = task.get("quality") if task.get("quality") is not None else config.VIDEO_QUALITY
     foley_on = (
         1
-        if config.FOLEY_ENABLE and not config.DRY_RUN and bool(task.get("audio", True))
+        if config.FOLEY_ENABLE and not config.DRY_RUN and bool(task.get("audio"))
         else 0
     )
     prompt = task.get("prompt") or ""

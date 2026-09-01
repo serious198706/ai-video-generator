@@ -53,7 +53,7 @@ Java 调用端见 [JAVA.md](JAVA.md)（提交 / 查询 / webhook / 探活）。L
 | `resolution` | 否 | `540p` / `720p` / `1080p`，本轮只记录，画布仍 480×832 |
 | `webhookUrl` | 否 | 成功和失败都会 POST |
 | `steps` / `quality` / `seed` / `lastImage` | 否 | Wan 私有字段；`quality` 为导出 1–10 |
-| `audio` | 否 | 是否配 Foley，默认 `true` |
+| `audio` | 否 | 是否配 Foley，默认 `false`。不传或 `null` 都不配音；传 `true` 才跑 Foley |
 
 `GET /v1/tasks/{id}` 读 Redis String。Lambda `/health` Ping Redis，不再因「模型未就绪」503。GPU 本机 `/ready` 仅运维用。`/docs` 默认关闭。
 

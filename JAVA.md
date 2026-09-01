@@ -26,7 +26,7 @@ Content-Type: application/json
 | quality | integer | 否 | 导出质量 1–10 |
 | seed | integer | 否 | 不传则服务端随机；完成后可在查询 / webhook 拿到实际值 |
 | lastImage | string | 否 | 尾帧 HTTPS URL，约束同 image |
-| audio | boolean | 否 | 是否配 Foley。默认 `true`。`false` 则只出无声片，不占 Foley 时间。服务端关掉 Foley 时即使传 `true` 也是无声片 |
+| audio | boolean | 否 | 是否配 Foley。默认 `false`（不传或 `null` 都不配音）。传 `true` 才跑 Foley。服务端关掉 Foley 时即使传 `true` 也是无声片 |
 
 请求示例：
 
