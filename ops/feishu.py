@@ -32,8 +32,10 @@ def send(text: str, webhook: str | None = None, secret: str | None = None) -> No
     webhook = (webhook or os.environ.get("WAN22_FEISHU_WEBHOOK") or "").strip()
     secret = (secret or os.environ.get("WAN22_FEISHU_SECRET") or "").strip()
     if not webhook:
-        print(text)
+        print("[feishu] WAN22_FEISHU_WEBHOOK empty, skip POST", flush=True)
+        print(text, flush=True)
         return
+    print(f"[feishu] POST {webhook[:48]}…", flush=True)
     body: dict = {"msg_type": "text", "content": {"text": text}}
     if secret:
         ts = str(int(time.time()))
@@ -48,8 +50,13 @@ def send(text: str, webhook: str | None = None, secret: str | None = None) -> No
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             payload = resp.read().decode()
+            print(f"[feishu] HTTP {resp.status} {payload}", flush=True)
+    except urllib.error.HTTPError as exc:
+        err_body = exc.read().decode() if exc.fp else ""
+        print(f"[feishu] HTTP {exc.code} {err_body}", file=sys.stderr, flush=True)
+        raise SystemExit(1) from exc
     except urllib.error.URLError as exc:
-        print(f"[feishu] send failed: {exc}", file=sys.stderr)
+        print(f"[feishu] send failed: {exc}", file=sys.stderr, flush=True)
         raise SystemExit(1) from exc
     try:
         parsed = json.loads(payload)
@@ -57,9 +64,9 @@ def send(text: str, webhook: str | None = None, secret: str | None = None) -> No
         parsed = {}
     code = parsed.get("code", parsed.get("Code", parsed.get("StatusCode", 0)))
     if code not in (0, "0", None):
-        print(f"[feishu] {payload}", file=sys.stderr)
+        print(f"[feishu] API error {payload}", file=sys.stderr, flush=True)
         raise SystemExit(1)
-    print("[feishu] sent")
+    print("[feishu] sent", flush=True)
 
 
 def main() -> None:
