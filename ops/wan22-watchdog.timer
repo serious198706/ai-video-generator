@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Wan22 GPU watchdog every 2 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+AccuracySec=30s
+Persistent=true
+Unit=wan22-watchdog.service
+
+[Install]
+WantedBy=timers.target

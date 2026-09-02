@@ -118,6 +118,8 @@ uvicorn wan22.api.app:app --port 8001
 
 记录入队、拒单（400/429/503）、推理开始/结束（含 seed、分辨率、耗时）、上传 URL、webhook 成败、进程重启后重试。uvicorn access 也进同一文件。
 
+GPU 本机异常告警、Mac 上每小时/每日抽日志，见 [ops/README.md](ops/README.md)。
+
 ## 队列
 
 ElastiCache Redis，哈希标签 `{wan22}`：

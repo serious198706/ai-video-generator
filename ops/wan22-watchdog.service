@@ -1,0 +1,12 @@
+[Unit]
+Description=Wan22 GPU watchdog (memory/disk/service/nvidia)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/server
+EnvironmentFile=-/opt/server/.env
+ExecStart=/opt/server/ops/watchdog.sh
+Nice=10
+MemoryMax=64M
+TimeoutStartSec=60
