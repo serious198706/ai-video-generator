@@ -34,11 +34,13 @@ if [[ -z "${filtered// }" ]]; then
 fi
 
 host_label="${WAN22_GPU_LABEL:-$HOST}"
-report="【Wan22 小时告警】${host_label}
-窗口 ${SINCE} → ${UNTIL}
+body="**窗口** ${SINCE} → ${UNTIL}
 
 ${filtered}"
-printf '%s\n' "$report"
+printf '%s\n' "$body"
 if [[ "$NOTIFY" == "1" && -n "${WAN22_FEISHU_WEBHOOK:-}" ]]; then
-  printf '%s\n' "$report" | python3 "$OPS/feishu.py"
+  printf '%s\n' "$body" | python3 "$OPS/feishu.py" \
+    --title "⚠️ Wan22 小时告警 | ${host_label}" \
+    --template orange \
+    --note "仅在出现 ERROR / failed 时发送"
 fi

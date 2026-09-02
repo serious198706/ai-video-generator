@@ -31,8 +31,8 @@ host_label="${WAN22_GPU_LABEL:-$HOST}"
 raw="$(ssh "${SSH_OPTS[@]}" "$HOST" \
   "journalctl -u $(printf %q "$UNIT") --since $(printf %q "$SINCE") --until $(printf %q "$UNTIL") --no-pager | grep timing || true")"
 
-report="$(printf '%s\n' "$raw" | python3 "$OPS/digest.py" --start "$SINCE" --end "$UNTIL" --host "$host_label")"
-printf '%s\n' "$report"
+spec="$(printf '%s\n' "$raw" | python3 "$OPS/digest.py" --json --start "$SINCE" --end "$UNTIL" --host "$host_label")"
+python3 -c 'import json,sys; d=json.loads(sys.stdin.read()); print(d["title"]); print(); print("\n\n".join(d["sections"])); print(); print(d["note"])' <<<"$spec"
 if [[ "$NOTIFY" == "1" && -n "${WAN22_FEISHU_WEBHOOK:-}" ]]; then
-  printf '%s\n' "$report" | python3 "$OPS/feishu.py"
+  printf '%s\n' "$spec" | python3 "$OPS/feishu.py" --json
 fi

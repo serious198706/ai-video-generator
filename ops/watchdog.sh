@@ -115,14 +115,18 @@ fi
 
 host="$(hostname -s 2>/dev/null || hostname)"
 {
-  echo "【Wan22 watchdog】${host} $(date '+%Y-%m-%d %H:%M:%S %Z')"
+  echo "**主机** ${host}"
   echo
   for line in "${fresh[@]}"; do
-    echo "- $line"
+    echo "- ${line}"
   done
 } >"$STATE_DIR/last-message.txt"
 
-python3 "$OPS/feishu.py" --file "$STATE_DIR/last-message.txt"
+python3 "$OPS/feishu.py" \
+  --title "❌ Wan22 watchdog | 异常" \
+  --template red \
+  --note "$(date '+%Y-%m-%d %H:%M:%S %Z')" \
+  --file "$STATE_DIR/last-message.txt"
 
 for key in "${fresh_keys[@]}"; do
   echo "$NOW" >"$STATE_DIR/alert-$(echo "$key" | tr '/:' '__')"

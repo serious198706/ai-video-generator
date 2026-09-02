@@ -26,11 +26,10 @@ sudo systemctl start wan22-watchdog.service   # 立刻跑一次试
 
 **不按显存占用百分比告警**（Wan 常驻 48GB 卡上占用高是正常的）。
 
-试跑：
+只测飞书通不通（会往群里打一张绿色测试卡片）：
 
 ```bash
-sudo /opt/server/ops/watchdog.sh
-journalctl -u wan22-watchdog -n 50 --no-pager
+sudo bash /opt/server/ops/test-feishu.sh
 ```
 
 SSH 用户要能 `journalctl -u wan22-gpu`：`sudo usermod -aG systemd-journal ubuntu` 后重新登录。
@@ -74,4 +73,4 @@ Hermes cron 不稳时，用 launchd / crontab 直接跑这两条即可，不依�
 
 ## 飞书
 
-群 → 设置 → 机器人 → 自定义机器人。安全校验若是「自定义关键词」，日报/告警正文里要带那个词（可把关键词写进 `WAN22_GPU_LABEL`）。开了签名就把 secret 放进 `.env`。
+群自定义机器人，消息是 **卡片**（`interactive`）：日报绿头、小时告警橙头、watchdog 红头。签名算法见 `feishu.py`。
