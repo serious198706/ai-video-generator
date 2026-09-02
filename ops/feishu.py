@@ -18,9 +18,10 @@ _MAX = 18000
 
 
 def _sign(secret: str, timestamp: str) -> str:
-    raw = f"{timestamp}\n{secret}".encode()
-    digest = hmac.new(secret.encode(), raw, hashlib.sha256).digest()
-    return base64.b64encode(digest).decode()
+    # 飞书：key = timestamp + "\n" + secret，对空消息做 HMAC-SHA256 再 Base64。
+    string_to_sign = f"{timestamp}\n{secret}".encode("utf-8")
+    digest = hmac.new(string_to_sign, digestmod=hashlib.sha256).digest()
+    return base64.b64encode(digest).decode("utf-8")
 
 
 def send(text: str, webhook: str | None = None, secret: str | None = None) -> None:
@@ -41,6 +42,7 @@ def send(text: str, webhook: str | None = None, secret: str | None = None) -> No
         ts = str(int(time.time()))
         body["timestamp"] = ts
         body["sign"] = _sign(secret, ts)
+        print(f"[feishu] signing timestamp={ts}", flush=True)
     req = urllib.request.Request(
         webhook,
         data=json.dumps(body).encode(),
