@@ -16,12 +16,12 @@ Content-Type: application/json
 
 | 字段名 | 类型 | 必须 | 说明 |
 | --- | --- | --- | --- |
-| image | string | 是 | 首帧 HTTPS URL，公网图（已加白名单的 CloudFront 等）。接口只校验，GPU 出队后再下载。不要传 base64 / multipart |
+| image | string | 是 | 首帧 HTTPS URL，须解析到公网。配置了 `WAN22_IMAGE_HOSTS` 时 host 须在名单内；空则任意公网 https。接口只校验，GPU 出队后再下载。不要传 base64 / multipart |
 | prompt | string | 否 | 空或省略则用服务端默认提示词 |
 | negativePrompt | string | 否 | 会传给模型 |
 | duration | number | 否 | 秒，`(0, 15]`，默认 5。可写 5 或 5.0 |
 | resolution | string | 否 | 仅 `540p` / `720p` / `1080p`。本轮只记录，画布仍约 480×832，不会真超分 |
-| webhookUrl | string | 否 | 成功、失败都会 POST。必须 https，host 需在 `WAN22_WEBHOOK_HOSTS`（允许内网） |
+| webhookUrl | string | 否 | 成功、失败都会 POST。必须 https。配置了 `WAN22_WEBHOOK_HOSTS` 时 host 须在名单内（允许内网）；空则不限制 host |
 | steps | integer | 否 | 1–50，不传则用服务端默认 |
 | quality | integer | 否 | 导出质量 1–10 |
 | seed | integer | 否 | 不传则服务端随机；完成后可在查询 / webhook 拿到实际值 |
@@ -72,7 +72,7 @@ Content-Type: application/json
 
 | HTTP | 说明 |
 | --- | --- |
-| 400 | 图 / webhook URL 不合法：非 https、host 不在白名单、图解析到私网 |
+| 400 | 图 / webhook URL 不合法：非 https、图解析到私网；配置了白名单时 host 不在名单内 |
 | 422 | 字段类型或范围不对（duration 超 15、resolution 不是那三个枚举等） |
 | 429 | 排队 List ≥ 500（正在跑的不算进这 500） |
 | 503 | Redis 不可用或入队失败 |
@@ -166,7 +166,7 @@ Webhook（可选）
 - 请求参数:
 Content-Type: application/json
 
-任务进入 `succeeded` 或 `failed` 时回调（失败也会 POST）。期望返回 2xx。超时约 5s，最多重试 3 次。必须 https；host 需在 `WAN22_WEBHOOK_HOSTS`。图床域名需在 `WAN22_IMAGE_HOSTS`。
+任务进入 `succeeded` 或 `failed` 时回调（失败也会 POST）。期望返回 2xx。超时约 5s，最多重试 3 次。必须 https。配置了 `WAN22_WEBHOOK_HOSTS` / `WAN22_IMAGE_HOSTS` 时 host 须在对应名单内；空则不限制 host。
 
 Header：
 

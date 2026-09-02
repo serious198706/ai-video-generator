@@ -15,7 +15,7 @@ _MAX_REDIRECTS = 5
 
 
 def download_image(url: str, dest: Path) -> str:
-    """按白名单下载 JPEG/PNG。返回最终文件路径。"""
+    """下载 JPEG/PNG。有 WAN22_IMAGE_HOSTS 时按白名单；空则任意公网 https。返回最终文件路径。"""
     current = assert_https_url(url, config.IMAGE_HOSTS, kind="image")
     dest.parent.mkdir(parents=True, exist_ok=True)
 

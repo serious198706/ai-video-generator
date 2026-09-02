@@ -37,8 +37,8 @@ Lambda Runtime 选 **Python 3.12**、架构 **x86_64**。Handler：`lambda_api.h
 | --- | --- |
 | `WAN22_REDIS_URL` | `rediss://…` ElastiCache Serverless |
 | `WAN22_QUEUE_MAX` | 默认 500。`LLEN({wan22}:queue) >=` 此值则 429 |
-| `WAN22_IMAGE_HOSTS` | 图片 URL 白名单 |
-| `WAN22_WEBHOOK_HOSTS` | webhook URL 白名单 |
+| `WAN22_IMAGE_HOSTS` | 图片 URL 白名单。空则不限制 host（仍要求 https、公网） |
+| `WAN22_WEBHOOK_HOSTS` | webhook URL 白名单。空则不限制 host（仍要求 https） |
 | `WAN22_DEFAULT_PROMPT` / `WAN22_NEGATIVE` | 可选，与 GPU 保持一致 |
 
 不需要 `WAN22_S3_*`、模型路径、Foley。

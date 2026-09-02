@@ -57,7 +57,7 @@ Java 调用端见 [JAVA.md](JAVA.md)（提交 / 查询 / webhook / 探活）。L
 
 `GET /v1/tasks/{id}` 读 Redis String。Lambda `/health` Ping Redis，不再因「模型未就绪」503。GPU 本机 `/ready` 仅运维用。`/docs` 默认关闭。
 
-图片 URL 必须解析到公网（防 SSRF）。Webhook 走独立白名单，**允许内网 IP**（Java 就在内网），但仍拒绝链路本地 / `169.254.169.254`。
+图片 URL 必须 https 且解析到公网（防 SSRF）。`WAN22_IMAGE_HOSTS` 有值才限制图床域名。Webhook 走 `WAN22_WEBHOOK_HOSTS`，**允许内网 IP**（Java 就在内网），但仍拒绝链路本地 / `169.254.169.254`；该项为空则不限制 host。
 
 Webhook body 与任务查询字段一致：`id`、`task_id`、`status`、`video_url`、`error`、`seed`、`duration`、`resolution`。失败时 `error` 仅为短码：`generate_failed` / `foley_failed` / `upload_failed` / `download_failed` / `interrupted`。配置了 `WAN22_WEBHOOK_SECRET` 时带 `X-Wan-Signature: sha256=…`。
 
@@ -68,11 +68,9 @@ Webhook body 与任务查询字段一致：`id`、`task_id`、`status`、`video_
 必填：
 
 - `WAN22_REDIS_URL`（ElastiCache Serverless 用 `rediss://`）
-- `WAN22_IMAGE_HOSTS`（空则拒绝图片 URL）
-- `WAN22_WEBHOOK_HOSTS`（请求带了 `webhookUrl` 但此项为空则 400）
 - `WAN22_S3_BUCKET`（GPU 非 DRY_RUN 启动时必填）
 
-列表用逗号分隔，`.cloudfront.net` 这种写法按后缀匹配。
+`WAN22_IMAGE_HOSTS` / `WAN22_WEBHOOK_HOSTS` 可选。逗号分隔，`.cloudfront.net` 这种写法按后缀匹配。**空或不设则不限制 host**；仍要求 https。图片继续拒绝私网（防 SSRF）；webhook 允许内网，拒绝链路本地。Lambda 与 GPU 各自读自己的环境变量，要放开图床时两边都清空。
 
 成片：`WAN22_S3_BUCKET` / `WAN22_S3_REGION` / `WAN22_S3_PREFIX`，回传 URL 用 `WAN22_S3_PUBLIC_BASE_URL`（CloudFront）。凭证走 GPU 机 IAM Role，或标准的 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`。
 

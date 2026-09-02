@@ -28,8 +28,10 @@ class UrlError(ValueError):
 
 def host_allowed(host: str, allowlist: tuple[str, ...]) -> bool:
     host = host.lower().rstrip(".")
-    if not host or not allowlist:
+    if not host:
         return False
+    if not allowlist:
+        return True
     for entry in allowlist:
         entry = entry.lower().rstrip(".")
         if not entry:
@@ -51,17 +53,17 @@ def assert_https_url(
     kind: str,
     allow_private: bool = False,
 ) -> str:
-    """校验 https、白名单、无 userinfo。图片默认拒绝私网；回调允许内网但拒绝链路本地。"""
+    """校验 https、无 userinfo。allowlist 为空则不限制 host。图片默认拒绝私网；回调允许内网但拒绝链路本地。"""
     parsed = urlparse(url.strip())
     if parsed.scheme != "https":
-        raise UrlError(f"{kind} 只允许 https")
+        raise UrlError(f"{kind} only https allowed")
     if parsed.username or parsed.password:
-        raise UrlError(f"{kind} 不能包含用户名密码")
+        raise UrlError(f"{kind} must not contain username or password")
     host = parsed.hostname
     if not host:
-        raise UrlError(f"{kind} 缺少 host")
+        raise UrlError(f"{kind} missing host")
     if not host_allowed(host, allowlist):
-        raise UrlError(f"{kind} host 不在白名单")
+        raise UrlError(f"{kind} host not in allowlist")
     _assert_resolved(host, allow_private=allow_private)
     return url.strip()
 
@@ -74,11 +76,11 @@ def _assert_resolved(host: str, *, allow_private: bool) -> None:
     addresses = _resolve(host)
     for ip in addresses:
         if any(ip in network for network in _METADATA_NETWORKS) or ip.is_link_local or ip.is_multicast:
-            raise UrlError("URL 指向了不允许的地址")
+            raise UrlError("URL points to an disallowed address")
         if allow_private:
             continue
         if ip.is_private or ip.is_loopback or any(ip in network for network in _PRIVATE_NETWORKS):
-            raise UrlError("URL 指向了不允许的地址")
+            raise UrlError("URL points to an disallowed address")
 
 
 def _resolve(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
@@ -91,7 +93,7 @@ def _resolve(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
     try:
         infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
-        raise UrlError("无法解析 URL host") from exc
+        raise UrlError("failed to resolve URL host") from exc
     if not infos:
-        raise UrlError("无法解析 URL host")
+        raise UrlError("failed to resolve URL host")
     return [ipaddress.ip_address(info[4][0]) for info in infos]
