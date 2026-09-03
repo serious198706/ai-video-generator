@@ -16,7 +16,7 @@ Content-Type: application/json
 
 | 字段名 | 类型 | 必须 | 说明 |
 | --- | --- | --- | --- |
-| image | string | 是 | 首帧 HTTPS URL，须解析到公网。配置了 `WAN22_IMAGE_HOSTS` 时 host 须在名单内；空则任意公网 https。接口只校验，GPU 出队后再下载。不要传 base64 / multipart |
+| image | string | 是 | 首帧 HTTPS URL，须解析到公网。JPEG / PNG / WebP / GIF 等 Pillow 能开的格式均可，GPU 下载后会转成 JPEG。配置了 `WAN22_IMAGE_HOSTS` 时 host 须在名单内；空则任意公网 https。接口只校验，GPU 出队后再下载。不要传 base64 / multipart |
 | prompt | string | 否 | 空或省略则用服务端默认提示词 |
 | negativePrompt | string | 否 | 会传给模型 |
 | duration | number | 否 | 秒，`(0, 15]`，默认 5。可写 5 或 5.0 |

@@ -8,7 +8,7 @@ import requests
 from wan22 import config
 from wan22.log import get_logger
 from wan22.net.urlguard import UrlError, assert_https_url
-from wan22.media.image import rewrite_rgb
+from wan22.media.image import decode_to_jpeg
 
 logger = get_logger(__name__)
 
@@ -16,8 +16,9 @@ _MAX_REDIRECTS = 5
 
 
 def download_image(url: str, dest: Path) -> str:
-    """下载 JPEG/PNG。有 WAN22_IMAGE_HOSTS 时按白名单；空则任意公网 https。返回最终文件路径。"""
+    """下载图片。Pillow 能开的格式都会转成 JPEG。有 WAN22_IMAGE_HOSTS 时按白名单；空则任意公网 https。"""
     current = assert_https_url(url, config.IMAGE_HOSTS, kind="image")
+    logger.info("downloading %s", current)
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     with requests.Session() as session:
@@ -32,25 +33,21 @@ def download_image(url: str, dest: Path) -> str:
                     headers={"User-Agent": "wan22-server/1"},
                 )
             except requests.RequestException as exc:
-                raise UrlError("下载图片失败") from exc
+                raise UrlError(f"下载图片失败 url={current}") from exc
 
             if response.is_redirect:
                 location = response.headers.get("Location")
                 if not location:
-                    raise UrlError("下载图片失败")
+                    raise UrlError(f"下载图片失败 url={current}")
                 current = urljoin(current, location)
                 continue
             if response.status_code != 200:
-                raise UrlError("下载图片失败")
+                raise UrlError(f"下载图片失败 status={response.status_code} url={current}")
             payload = _read_limited(response)
-            suffix = _sniff_suffix(payload)
-            path = dest.with_suffix(suffix)
-            path.write_bytes(payload)
             try:
-                path = rewrite_rgb(path)
+                path = decode_to_jpeg(payload, dest)
             except Exception as exc:
-                path.unlink(missing_ok=True)
-                raise UrlError("无法解码图片") from exc
+                raise UrlError(f"无法解码图片 url={current}") from exc
             logger.info("downloaded %s bytes=%s -> %s", current, len(payload), path.name)
             return str(path)
 
@@ -71,11 +68,3 @@ def _read_limited(response: requests.Response) -> bytes:
     if not chunks:
         raise UrlError("图片为空")
     return bytes(chunks)
-
-
-def _sniff_suffix(payload: bytes) -> str:
-    if payload.startswith(b"\xff\xd8"):
-        return ".jpg"
-    if payload.startswith(b"\x89PNG\r\n\x1a\n"):
-        return ".png"
-    raise UrlError("只支持 JPEG 或 PNG")

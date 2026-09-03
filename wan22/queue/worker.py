@@ -212,7 +212,12 @@ def _run(task_id: str) -> None:
             video_url=video_url,
         )
     except UrlError:
-        logger.exception("download failed task=%s", task_id)
+        logger.exception(
+            "download failed task=%s image=%s last=%s",
+            task_id,
+            task.get("image_url"),
+            task.get("last_image_url"),
+        )
         _fail_or_retry(task_id, "download_failed")
     finally:
         _remove(first_path, last_path, output)
@@ -228,7 +233,7 @@ def _ensure_image(task: dict, kind: str) -> str:
     url = task.get(url_key)
     if not url:
         raise UrlError("missing image")
-    logger.info("re-download task=%s kind=%s", task["id"], kind)
+    logger.info("re-download task=%s kind=%s url=%s", task["id"], kind, url)
     saved = download.download_image(url, config.UPLOAD_DIR / f"{task['id']}_{kind}")
     store.update_task(task["id"], **{path_key: saved})
     return saved

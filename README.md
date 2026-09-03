@@ -46,7 +46,7 @@ Java 调用端见 [JAVA.md](JAVA.md)（提交 / 查询 / webhook / 探活）。L
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
-| `image` | 是 | HTTPS 图片 URL（S3 / CloudFront）；Lambda 只校验，GPU `LPOP` 后下载 |
+| `image` | 是 | HTTPS 图片 URL（JPEG / PNG / WebP / GIF 等）；Lambda 只校验，GPU `LPOP` 后下载并转成 JPEG |
 | `prompt` | 否 | 空则用 `WAN22_DEFAULT_PROMPT` |
 | `negativePrompt` | 否 | 会传给 pipeline；`guidance_scale=1` 时不生效 |
 | `duration` | 否 | `(0, 15]` 秒，默认 5 |
