@@ -504,16 +504,17 @@ def generate_video(
         return used_seed
 
     import torch
-    from diffusers.utils import export_to_video, load_image
+    from diffusers.utils import export_to_video
+    from wan22.media.image import open_rgb
 
     pipe = load_pipe()
-    image = _resize_for_wan(load_image(first_frame_path), pipe)
+    image = _resize_for_wan(open_rgb(first_frame_path), pipe)
 
     last_image = None
     if last_frame_path:
         if not _supports_last_image():
             raise ValueError("当前 diffusers 不支持 last_image")
-        last_image = _resize_and_crop_to_match(load_image(last_frame_path), image)
+        last_image = _resize_and_crop_to_match(open_rgb(last_frame_path), image)
 
     num_frames = _snap_frames(duration)
     generator = torch.Generator(device="cuda").manual_seed(used_seed)

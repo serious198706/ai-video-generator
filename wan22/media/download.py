@@ -8,6 +8,7 @@ import requests
 from wan22 import config
 from wan22.log import get_logger
 from wan22.net.urlguard import UrlError, assert_https_url
+from wan22.media.image import rewrite_rgb
 
 logger = get_logger(__name__)
 
@@ -45,6 +46,11 @@ def download_image(url: str, dest: Path) -> str:
             suffix = _sniff_suffix(payload)
             path = dest.with_suffix(suffix)
             path.write_bytes(payload)
+            try:
+                path = rewrite_rgb(path)
+            except Exception as exc:
+                path.unlink(missing_ok=True)
+                raise UrlError("无法解码图片") from exc
             logger.info("downloaded %s bytes=%s -> %s", current, len(payload), path.name)
             return str(path)
 
