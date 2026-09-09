@@ -22,6 +22,10 @@ if [[ "$WAN22_LAYOUT" == "autodl" ]]; then
   : "${WAN22_FOLEY_REPO:=$WAN22_DATA_ROOT/HunyuanVideo-Foley}"
   : "${HF_HOME:=$WAN22_DATA_ROOT/hf-cache}"
   : "${HF_ENDPOINT:=https://hf-mirror.com}"
+  # git clone / pip git+https。挂了就换：https://ghfast.top/https://github.com/ 或 https://kkgithub.com/
+  : "${WAN22_GITHUB_MIRROR:=https://gitclone.com/github.com/}"
+  : "${PIP_INDEX_URL:=https://pypi.tuna.tsinghua.edu.cn/simple}"
+  : "${PIP_TRUSTED_HOST:=pypi.tuna.tsinghua.edu.cn}"
   : "${MODEL_ROOT:=$WAN22_DATA_ROOT/models}"
   : "${WAN22_DATA_DIR:=$WAN22_DATA_ROOT/runtime}"
   : "${WAN22_LOG_DIR:=$WAN22_DATA_ROOT/logs}"
@@ -67,3 +71,14 @@ export WAN22_FOLEY_STEPS WAN22_FOLEY_GUIDANCE WAN22_FOLEY_TIMEOUT WAN22_FOLEY_RE
 export HF_HOME HF_ENDPOINT MODEL_ROOT WAN22_MODEL_DIR WAN22_LORA_DIR WAN22_NSFW_HIGH WAN22_NSFW_LOW
 export WAN22_DATA_DIR WAN22_LOG_DIR WAN22_INSTALL_TORCH WAN22_VENV_SYSTEM_SITE
 export WAN22_HOST WAN22_PORT
+
+if [[ -n "${WAN22_GITHUB_MIRROR:-}" ]]; then
+  export WAN22_GITHUB_MIRROR
+  export GIT_CONFIG_COUNT=1
+  export GIT_CONFIG_KEY_0="url.${WAN22_GITHUB_MIRROR}.insteadof"
+  export GIT_CONFIG_VALUE_0="https://github.com/"
+fi
+if [[ -n "${PIP_INDEX_URL:-}" ]]; then
+  export PIP_INDEX_URL
+  export PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST:-}"
+fi

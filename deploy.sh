@@ -42,6 +42,7 @@ echo "[wan22] layout=$WAN22_LAYOUT python=$BASE_PY"
 echo "[wan22] venv=$WAN22_VENV_DIR"
 echo "[wan22] models=$WAN22_MODEL_DIR"
 echo "[wan22] hf_home=$HF_HOME endpoint=${HF_ENDPOINT:-https://huggingface.co}"
+echo "[wan22] github_mirror=${WAN22_GITHUB_MIRROR:-https://github.com/} pip_index=${PIP_INDEX_URL:-pypi.org}"
 
 if [[ "$WAN22_LAYOUT" == "autodl" ]]; then
   if [[ ! -d /root/autodl-tmp ]]; then
