@@ -111,7 +111,6 @@ mkdir -p "$WAN22_MODEL_DIR" "$WAN22_LORA_DIR/nsfw" "$HF_HOME" "$WAN22_DATA_DIR" 
 
 echo "[wan22] downloading WAMU v3 Lightning base model"
 hf download thornmaze/WAMU_v3_WAN2.2_I2V_LIGHTNING \
-  --cache-dir "$HF_HOME" \
   --local-dir "$WAN22_MODEL_DIR"
 
 echo "[wan22] downloading General NSFW Booster"
@@ -119,7 +118,6 @@ hf download lopi999/Wan2.2-I2V_General-NSFW-LoRA \
   NSFW-22-H-e8.safetensors \
   NSFW-22-L-e8.safetensors \
   --revision aeef17d7fa51 \
-  --cache-dir "$HF_HOME" \
   --local-dir "$WAN22_LORA_DIR/nsfw"
 
 if [[ "$FOLEY_SKIP" == "1" ]]; then
@@ -211,7 +209,6 @@ PY
   mkdir -p "$WAN22_FOLEY_MODEL_DIR"
   echo "[wan22] downloading HunyuanVideo-Foley weights"
   hf download tencent/HunyuanVideo-Foley \
-    --cache-dir "$HF_HOME" \
     --local-dir "$WAN22_FOLEY_MODEL_DIR"
 fi
 
