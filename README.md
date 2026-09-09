@@ -78,16 +78,30 @@ Lambda 与 GPU 共用 Redis 和白名单；Lambda **必须进 ElastiCache 同一
 
 ## 启动
 
-GPU 机只跑 worker（本机 `127.0.0.1:8000` 的 `/health` `/ready` 给运维）：
+GPU 机只跑 worker。路径由 `worker-env.sh` 按机器决定：有 `/root/autodl-tmp` 走 AutoDL 数据盘和镜像 conda Torch；否则现网 EC2 的 `/opt` + `/data`。
 
 ```bash
 cp .env.example .env
-# 改 Redis / hosts / S3
+# 改 Redis / hosts / S3。AutoDL 不要改路径，不要设 WAN22_INSTALL_TORCH=1
 ./deploy.sh
 ./start.sh
 ```
 
-`deploy.sh` 会装 Wan venv、WAMU 权重，以及独立的 Foley venv（`/opt/foley-venv`）和 HunyuanVideo-Foley XL 权重。Foley 沿用已有解释器，不重建 venv；3.14 上会改用带轮子的 Pillow / NumPy，避免源码编译。只要 Foley 的 python 在，`start.sh` 默认打开配音。不要 Foley：`.env` 里 `WAN22_FOLEY_ENABLE=0`，或 `WAN22_FOLEY_SKIP=1 ./deploy.sh`。
+AutoDL 权重、venv、日志在 `/root/autodl-tmp/wan22`。系统盘只有 30G。`start.sh` 监听 `0.0.0.0:8000`，长时间跑请用 `screen`。第一次默认跳过 Foley。
+
+干净 Ubuntu 26.04（裸金属，没有 DLAMI）先做系统层，再走上面的 `deploy.sh`：
+
+```bash
+# 可选：在现网 EC2 上跑，把驱动 / Python / torch 版本打出来对照
+./inspect-host.sh
+
+# 裸金属：root 安装 python/git/ffmpeg；驱动未装时先 --install-driver 并 reboot
+sudo ./bootstrap-ubuntu.sh --install-driver --skip-deploy
+# reboot 后
+sudo ./bootstrap-ubuntu.sh
+```
+
+`deploy.sh` 会装 Wan venv 和 WAMU 权重。AutoDL 继承镜像 `torch 2.12.1+cu130`，不装 cu128；EC2 仍装 cu128。Foley 在 AutoDL 默认跳过（`WAN22_FOLEY_SKIP=1`）；现网检测到 Foley python 后 `start.sh` 默认打开。不要 Foley：`.env` 里 `WAN22_FOLEY_ENABLE=0`。
 
 无 GPU 联调接口（本机 Redis）：
 

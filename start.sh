@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd "$(dirname "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
 
 if [[ -f .env ]]; then
   set -a
@@ -9,30 +10,14 @@ if [[ -f .env ]]; then
   source .env
   set +a
 fi
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/worker-env.sh"
 
 if [[ -z "${WAN22_REDIS_URL:-}" ]]; then
   echo "[wan22] 请在 .env 里设置 WAN22_REDIS_URL（ElastiCache 用 rediss://）" >&2
   exit 1
 fi
 
-export HF_HOME="${HF_HOME:-/data/hf-cache}"
-export MODEL_ROOT="${MODEL_ROOT:-/data/models/wan22}"
-export WAN22_MODEL_DIR="${WAN22_MODEL_DIR:-$MODEL_ROOT/base/WAMU_v3_WAN2.2_I2V_LIGHTNING}"
-export WAN22_LORA_DIR="${WAN22_LORA_DIR:-$MODEL_ROOT/loras}"
-export WAN22_NSFW_HIGH="${WAN22_NSFW_HIGH:-$WAN22_LORA_DIR/nsfw/NSFW-22-H-e8.safetensors}"
-export WAN22_NSFW_LOW="${WAN22_NSFW_LOW:-$WAN22_LORA_DIR/nsfw/NSFW-22-L-e8.safetensors}"
-
-FOLEY_VENV_DIR="${WAN22_FOLEY_VENV_DIR:-/opt/foley-venv}"
-export WAN22_FOLEY_PYTHON="${WAN22_FOLEY_PYTHON:-$FOLEY_VENV_DIR/bin/python}"
-export WAN22_FOLEY_REPO="${WAN22_FOLEY_REPO:-/opt/HunyuanVideo-Foley}"
-export WAN22_FOLEY_MODEL_DIR="${WAN22_FOLEY_MODEL_DIR:-/data/models/hunyuanvideo-foley}"
-export WAN22_FOLEY_SIZE="${WAN22_FOLEY_SIZE:-xl}"
-export WAN22_FOLEY_PROMPT="${WAN22_FOLEY_PROMPT:-intimate erotic Foley matching the video, soft sensual ambient music, sultry atmosphere, breathy room tone, no speech, no lyrics}"
-export WAN22_FOLEY_NEG_PROMPT="${WAN22_FOLEY_NEG_PROMPT:-noisy, harsh, speech, lyrics, shouting}"
-export WAN22_FOLEY_STEPS="${WAN22_FOLEY_STEPS:-50}"
-export WAN22_FOLEY_GUIDANCE="${WAN22_FOLEY_GUIDANCE:-4.5}"
-export WAN22_FOLEY_TIMEOUT="${WAN22_FOLEY_TIMEOUT:-180}"
-export WAN22_FOLEY_REQUIRED="${WAN22_FOLEY_REQUIRED:-0}"
 if [[ -z "${WAN22_FOLEY_ENABLE:-}" ]]; then
   if [[ -x "$WAN22_FOLEY_PYTHON" ]]; then
     WAN22_FOLEY_ENABLE=1
@@ -42,8 +27,7 @@ if [[ -z "${WAN22_FOLEY_ENABLE:-}" ]]; then
 fi
 export WAN22_FOLEY_ENABLE
 
-VENV_DIR="${WAN22_VENV_DIR:-/opt/wan22-venv}"
-if [[ ! -f "$VENV_DIR/bin/activate" ]]; then
+if [[ ! -f "$WAN22_VENV_DIR/bin/activate" ]]; then
   echo "[wan22] 虚拟环境不存在，请先运行 ./deploy.sh" >&2
   exit 1
 fi
@@ -51,10 +35,11 @@ if [[ "$WAN22_FOLEY_ENABLE" == "1" && ! -x "$WAN22_FOLEY_PYTHON" ]]; then
   echo "[wan22] Foley 已打开但 $WAN22_FOLEY_PYTHON 不存在，请先运行 ./deploy.sh" >&2
   exit 1
 fi
-# shellcheck disable=SC1090
-source "$VENV_DIR/bin/activate"
 
-for command_name in python3 uvicorn; do
+# shellcheck disable=SC1091
+source "$WAN22_VENV_DIR/bin/activate"
+
+for command_name in python uvicorn; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     echo "[wan22] missing command: $command_name" >&2
     exit 1
@@ -77,13 +62,18 @@ export WAN22_FPS="${WAN22_FPS:-16}"
 export WAN22_MAX_FRAMES="${WAN22_MAX_FRAMES:-321}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
+echo "[wan22] layout=$WAN22_LAYOUT host=$WAN22_HOST:$WAN22_PORT"
+echo "[wan22] torch=$(python -c 'import torch; print(torch.__version__, torch.cuda.get_device_name(0) if torch.cuda.is_available() else "no-cuda")')"
+echo "[wan22] model=$WAN22_MODEL_DIR"
+echo "[wan22] foley=$WAN22_FOLEY_ENABLE"
+
 if [[ "${WAN22_DRY_RUN:-0}" != "1" ]]; then
   echo "[wan22] running preflight"
-  python3 -c "from wan22.infer.generate import preflight; preflight(); print('[wan22] preflight OK')"
+  python -c "from wan22.infer.generate import preflight; preflight(); print('[wan22] preflight OK')"
 fi
 
 # GPU 只推理：worker LPOP Redis。本机 /health /ready 给运维，不给 Java 接单。
 echo "[wan22] starting GPU worker"
 exec uvicorn wan22.api.app:app \
-  --host "${WAN22_HOST:-127.0.0.1}" \
-  --port "${WAN22_PORT:-8000}"
+  --host "${WAN22_HOST}" \
+  --port "${WAN22_PORT}"
