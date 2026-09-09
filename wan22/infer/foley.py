@@ -26,15 +26,15 @@ def preflight() -> None:
     if not config.FOLEY_ENABLE:
         return
     if not _SIDECAR.is_file():
-        raise FileNotFoundError(f"缺少 Foley sidecar: {_SIDECAR}")
+        raise FileNotFoundError(f"missing Foley sidecar: {_SIDECAR}")
     if not config.FOLEY_MODEL_DIR.is_dir():
-        raise FileNotFoundError(f"WAN22_FOLEY_MODEL_DIR 不存在: {config.FOLEY_MODEL_DIR}")
+        raise FileNotFoundError(f"WAN22_FOLEY_MODEL_DIR not found: {config.FOLEY_MODEL_DIR}")
     yaml_path = _config_path()
     if not yaml_path.is_file():
-        raise FileNotFoundError(f"Foley 配置不存在: {yaml_path}")
+        raise FileNotFoundError(f"Foley config not found: {yaml_path}")
     python = _python()
     if config.FOLEY_PYTHON and not Path(python).is_file():
-        raise FileNotFoundError(f"WAN22_FOLEY_PYTHON 不存在: {python}")
+        raise FileNotFoundError(f"WAN22_FOLEY_PYTHON not found: {python}")
     logger.info(
         "foley enabled python=%s size=%s model=%s repo=%s required=%s",
         python,
@@ -148,7 +148,7 @@ def _ensure() -> None:
     ready = _readline(timeout=max(config.FOLEY_TIMEOUT, 300))
     if not ready.get("ok") or not ready.get("ready"):
         _kill()
-        raise FoleyError(f"sidecar 未就绪: {ready}")
+        raise FoleyError(f"sidecar not ready: {ready}")
     logger.info("foley sidecar ready")
 
 
@@ -162,7 +162,7 @@ def _request(payload: dict) -> dict:
 
 def _write(payload: dict) -> None:
     if _proc is None or _proc.stdin is None:
-        raise FoleyError("sidecar stdin 不可用")
+        raise FoleyError("sidecar stdin unavailable")
     _proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
     _proc.stdin.flush()
 
@@ -170,7 +170,7 @@ def _write(payload: dict) -> None:
 def _readline(timeout: int) -> dict:
     proc = _proc
     if proc is None or proc.stdout is None:
-        raise FoleyError("sidecar stdout 不可用")
+        raise FoleyError("sidecar stdout unavailable")
     line: list[str] = []
 
     def _read() -> None:
@@ -181,16 +181,16 @@ def _readline(timeout: int) -> dict:
     reader.join(timeout)
     if reader.is_alive():
         _kill()
-        raise FoleyError(f"sidecar 超时 {timeout}s")
+        raise FoleyError(f"sidecar timeout: {timeout}s")
     raw = line[0] if line else ""
     if not raw:
         code = proc.poll()
         _kill()
-        raise FoleyError(f"sidecar 退出 code={code}")
+        raise FoleyError(f"sidecar exited with code={code}")
     try:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise FoleyError(f"sidecar 非 JSON: {raw[:200]!r}") from exc
+        raise FoleyError(f"sidecar not JSON: {raw[:200]!r}") from exc
 
 
 def _drain_stderr(proc: subprocess.Popen) -> None:

@@ -33,25 +33,25 @@ def download_image(url: str, dest: Path) -> str:
                     headers={"User-Agent": "wan22-server/1"},
                 )
             except requests.RequestException as exc:
-                raise UrlError(f"下载图片失败 url={current}") from exc
+                raise UrlError(f"download image failed with url={current}") from exc
 
             if response.is_redirect:
                 location = response.headers.get("Location")
                 if not location:
-                    raise UrlError(f"下载图片失败 url={current}")
+                    raise UrlError(f"download image failed url={current}")
                 current = urljoin(current, location)
                 continue
             if response.status_code != 200:
-                raise UrlError(f"下载图片失败 status={response.status_code} url={current}")
+                raise UrlError(f"download image failed with status={response.status_code} url={current}")
             payload = _read_limited(response)
             try:
                 path = decode_to_jpeg(payload, dest)
             except Exception as exc:
-                raise UrlError(f"无法解码图片 url={current}") from exc
+                raise UrlError(f"cannot decode image with url={current}") from exc
             logger.info("downloaded %s bytes=%s -> %s", current, len(payload), path.name)
             return str(path)
 
-    raise UrlError("下载图片失败")
+    raise UrlError("download image failed with other error: url={current}")
 
 
 def _read_limited(response: requests.Response) -> bytes:
@@ -62,9 +62,9 @@ def _read_limited(response: requests.Response) -> bytes:
                 continue
             chunks.extend(chunk)
             if len(chunks) > config.UPLOAD_MAX_BYTES:
-                raise UrlError("图片超过大小限制")
+                raise UrlError(f"image is too large: size={len(chunks)}")
     finally:
         response.close()
     if not chunks:
-        raise UrlError("图片为空")
+        raise UrlError("image is empty")
     return bytes(chunks)

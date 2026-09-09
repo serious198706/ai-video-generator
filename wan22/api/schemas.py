@@ -32,5 +32,5 @@ class GenerateRequest(BaseModel):
     @classmethod
     def _duration(cls, value: float) -> float:
         if value <= 0 or value > 15:
-            raise ValueError("duration 需在 (0, 15] 秒")
+            raise ValueError("duration must be between (0, 15] seconds")
         return value

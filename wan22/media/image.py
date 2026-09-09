@@ -26,7 +26,7 @@ def open_rgb(path: str | Path) -> Image.Image:
 def decode_to_jpeg(payload: bytes, dest: Path) -> Path:
     """任意 Pillow 能开的格式（JPEG/PNG/WebP/GIF/BMP/TIFF 等）转成 RGB JPEG。"""
     if _looks_like_html(payload):
-        raise ValueError("响应是 HTML 不是图片")
+        raise ValueError("respond with HTML, not image")
     previous = ImageFile.LOAD_TRUNCATED_IMAGES
     ImageFile.LOAD_TRUNCATED_IMAGES = True
     try:
@@ -35,7 +35,7 @@ def decode_to_jpeg(payload: bytes, dest: Path) -> Path:
             fmt = (image.format or "unknown").lower()
             rgb = _to_rgb(image)
     except UnidentifiedImageError as exc:
-        raise ValueError("无法识别图片格式") from exc
+        raise ValueError("unidentified image format") from exc
     finally:
         ImageFile.LOAD_TRUNCATED_IMAGES = previous
 

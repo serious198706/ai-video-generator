@@ -74,7 +74,7 @@ def _ao_config(name: str):
             for alias, candidate in _QUANT_PRESETS.items()
             if hasattr(quantization, candidate)
         )
-        raise ValueError(f"量化配置 {name!r} 不受当前 torchao 支持，可用预设: {supported}")
+        raise ValueError(f"current torchao does not support quantization preset {name!r}, available: {supported}")
     return factory()
 
 
@@ -112,50 +112,50 @@ def _check_model_metadata() -> None:
     try:
         metadata = json.loads(index_path.read_text())
     except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"无法读取 {index_path}: {exc}") from exc
+        raise ValueError(f"cannot read {index_path}: {exc}") from exc
 
     if metadata.get("_class_name") != "WanImageToVideoPipeline":
         raise ValueError(
-            f"{index_path} 不是 WanImageToVideoPipeline: "
+            f"{index_path} is not WanImageToVideoPipeline: "
             f"{metadata.get('_class_name')!r}"
         )
     if metadata.get("boundary_ratio") is None:
-        raise ValueError("模型缺少 boundary_ratio，无法正确切换高/低噪声 Transformer")
+        raise ValueError("model missing boundary_ratio, cannot switch high/low noise Transformer")
 
     scheduler_path = Path(config.MODEL_DIR, "scheduler", "scheduler_config.json")
     try:
         scheduler = json.loads(scheduler_path.read_text())
     except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"无法读取 {scheduler_path}: {exc}") from exc
+        raise ValueError(f"cannot read {scheduler_path}: {exc}") from exc
     scheduler_name = scheduler.get("_class_name")
     flow_shift = scheduler.get("flow_shift", scheduler.get("shift"))
     if scheduler_name != "UniPCMultistepScheduler" or float(flow_shift) != 3.0:
         raise ValueError(
-            "WAMU 参考配置要求 UniPCMultistepScheduler + flow_shift=3.0，"
-            f"实际为 {scheduler_name} + {flow_shift}"
+            "WAMU reference config requires UniPCMultistepScheduler + flow_shift=3.0, "
+            f"actual: {scheduler_name} + {flow_shift}"
         )
     logger.info("scheduler %s flow_shift=%s", scheduler_name, flow_shift)
 
 
 def _validate_config() -> None:
     if config.OFFLOAD not in {"model", "sequential", "none"}:
-        raise ValueError("WAN22_OFFLOAD 只能是 model、sequential 或 none")
+        raise ValueError("WAN22_OFFLOAD must be model, sequential or none")
     if config.FOLEY_SIZE not in {"xl", "xxl"}:
-        raise ValueError("WAN22_FOLEY_SIZE 只能是 xl 或 xxl")
+        raise ValueError("WAN22_FOLEY_SIZE must be xl or xxl")
     if config.FOLEY_STEPS < 1:
-        raise ValueError("WAN22_FOLEY_STEPS 必须大于 0")
+        raise ValueError("WAN22_FOLEY_STEPS must be greater than 0")
     if config.FOLEY_TIMEOUT < 1:
-        raise ValueError("WAN22_FOLEY_TIMEOUT 必须大于 0")
+        raise ValueError("WAN22_FOLEY_TIMEOUT must be greater than 0")
     if config.NUM_STEPS < 1:
-        raise ValueError("WAN22_STEPS 必须大于 0")
+        raise ValueError("WAN22_STEPS must be greater than 0")
     if config.FPS < 1:
-        raise ValueError("WAN22_FPS 必须大于 0")
+        raise ValueError("WAN22_FPS must be greater than 0")
     if config.MAX_FRAMES < 1:
-        raise ValueError("WAN22_MAX_FRAMES 必须大于 0")
+        raise ValueError("WAN22_MAX_FRAMES must be greater than 0")
     if config.SPATIAL_MULTIPLE < 1:
-        raise ValueError("WAN22_SPATIAL_MULTIPLE 必须大于 0")
+        raise ValueError("WAN22_SPATIAL_MULTIPLE must be greater than 0")
     if config.MIN_DIM > config.MAX_DIM:
-        raise ValueError("WAN22_MIN_DIM 不能大于 WAN22_MAX_DIM")
+        raise ValueError("WAN22_MIN_DIM must be less than WAN22_MAX_DIM")
     for name, value in (
         ("WAN22_MIN_DIM", config.MIN_DIM),
         ("WAN22_MAX_DIM", config.MAX_DIM),
@@ -163,18 +163,18 @@ def _validate_config() -> None:
     ):
         if value < 1 or value % config.SPATIAL_MULTIPLE:
             raise ValueError(
-                f"{name} 必须是正数且能被 WAN22_SPATIAL_MULTIPLE 整除"
+                f"{name} must be a positive number and divisible by WAN22_SPATIAL_MULTIPLE"
             )
     if not 1 <= config.VIDEO_QUALITY <= 10:
-        raise ValueError("WAN22_VIDEO_QUALITY 必须在 1..10")
+        raise ValueError("WAN22_VIDEO_QUALITY must be between 1 and 10")
     for name, value in (
         ("WAN22_NSFW_HIGH_SCALE", config.NSFW_HIGH_SCALE),
         ("WAN22_NSFW_LOW_SCALE", config.NSFW_LOW_SCALE),
     ):
         if value < 0:
-            raise ValueError(f"{name} 不能为负数")
+            raise ValueError(f"{name} must not be negative")
     if config.FOLEY_ENABLE and config.OFFLOAD != "none":
-        raise ValueError("Foley 需要 WAN22_OFFLOAD=none，成片后才能把 Wan 整模挪到 CPU")
+        raise ValueError("Foley requires WAN22_OFFLOAD=none, Wan must be moved to CPU after generation")
 
 
 def preflight() -> None:
@@ -187,11 +187,11 @@ def preflight() -> None:
     model_dir = Path(config.MODEL_DIR)
     if not (model_dir / "model_index.json").is_file():
         raise FileNotFoundError(
-            f"WAN22_MODEL_DIR={config.MODEL_DIR!r} 下没有 model_index.json"
+            f"WAN22_MODEL_DIR={config.MODEL_DIR!r} does not have model_index.json"
         )
     for subfolder in ("transformer", "transformer_2", "vae", "text_encoder", "scheduler"):
         if not (model_dir / subfolder).is_dir():
-            raise FileNotFoundError(f"{config.MODEL_DIR} 缺少子目录 {subfolder}")
+            raise FileNotFoundError(f"{config.MODEL_DIR} missing subdirectory {subfolder}")
 
     _check_model_metadata()
     _ao_config(config.QUANT)
@@ -205,7 +205,7 @@ def preflight() -> None:
         status = _probe_lora(path)
         logger.info("lora %s: %s, scale=%s, %s", name, status, scale, path)
         if status.startswith(("MISSING", "UNREADABLE", "SUSPECT")):
-            raise ValueError(f"LoRA {name} 不可用: {status} ({path})")
+            raise ValueError(f"LoRA {name} unavailable: {status} ({path})")
 
     if config.FOLEY_ENABLE:
         from wan22.infer import foley as foley_mod
@@ -496,8 +496,8 @@ def generate_video(
 
     if not first_frame_path:
         if last_frame_path:
-            raise ValueError("last_frame 必须与 first_frame 一起提供")
-        raise ValueError("WAMU I2V 必须提供 first_frame")
+            raise ValueError("last_frame must be provided with first_frame")
+        raise ValueError("WAMU I2V must provide first_frame")
     if config.DRY_RUN:
         logger.info("dry-run placeholder seed=%s duration=%s", used_seed, duration)
         _write_placeholder(output_path)
@@ -513,7 +513,7 @@ def generate_video(
     last_image = None
     if last_frame_path:
         if not _supports_last_image():
-            raise ValueError("当前 diffusers 不支持 last_image")
+            raise ValueError("current diffusers does not support last_image")
         last_image = _resize_and_crop_to_match(open_rgb(last_frame_path), image)
 
     num_frames = _snap_frames(duration)
