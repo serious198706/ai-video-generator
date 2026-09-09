@@ -41,7 +41,7 @@ BASE_PY="$(_python)"
 echo "[wan22] layout=$WAN22_LAYOUT python=$BASE_PY"
 echo "[wan22] venv=$WAN22_VENV_DIR"
 echo "[wan22] models=$WAN22_MODEL_DIR"
-echo "[wan22] hf_home=$HF_HOME"
+echo "[wan22] hf_home=$HF_HOME endpoint=${HF_ENDPOINT:-https://huggingface.co}"
 
 if [[ "$WAN22_LAYOUT" == "autodl" ]]; then
   if [[ ! -d /root/autodl-tmp ]]; then
