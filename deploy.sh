@@ -250,6 +250,7 @@ else
       --index-url https://download.pytorch.org/whl/cu128
   fi
   "$UPSCALE_PY" -m pip install --upgrade -r "$WAN22_UPSCALE_REPO/requirements.txt"
+  "$UPSCALE_PY" -m pip install --upgrade 'imageio-ffmpeg>=0.6.0'
   mkdir -p "$WAN22_UPSCALE_MODEL_DIR"
   echo "[wan22] downloading SeedVR2 3B FP8 + VAE"
   hf download --token $HF_TOKEN numz/SeedVR2_comfyUI \

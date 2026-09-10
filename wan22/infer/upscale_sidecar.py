@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import traceback
 from pathlib import Path
@@ -33,6 +34,26 @@ def _silence_library_stdout() -> None:
 def _reply(payload: dict) -> None:
     _JSON_OUT.write(json.dumps(payload, ensure_ascii=False) + "\n")
     _JSON_OUT.flush()
+
+
+def _ensure_ffmpeg() -> None:
+    """OpenCV mp4v 在 Linux 上经常写出纯绿片，必须用 ffmpeg/libx264。"""
+    if shutil.which("ffmpeg"):
+        _log(f"ffmpeg={shutil.which('ffmpeg')}")
+        return
+    try:
+        import imageio_ffmpeg
+
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception as exc:
+        raise RuntimeError(
+            "ffmpeg not found; install ffmpeg or imageio-ffmpeg in the upscale venv"
+        ) from exc
+    bindir = str(Path(exe).parent)
+    os.environ["PATH"] = bindir + os.pathsep + os.environ.get("PATH", "")
+    if not shutil.which("ffmpeg"):
+        raise RuntimeError(f"ffmpeg still not on PATH after adding {bindir}: {exe}")
+    _log(f"ffmpeg from imageio-ffmpeg: {exe}")
 
 
 def _snap_4n1(value: int) -> int:
@@ -84,6 +105,8 @@ def _cli_args(cli, req: dict, width: int, height: int, frames: int):
         "--vae_offload_device",
         "cpu",
         "--uniform_batch_size",
+        "--video_backend",
+        "ffmpeg",
         "--seed",
         "42",
     ]
@@ -121,6 +144,7 @@ def main() -> int:
             DEFAULT_VAE,
             str(Path(boot.model_dir).resolve()),
         )
+        _ensure_ffmpeg()
     except Exception as exc:
         _log(f"load failed: {exc}")
         traceback.print_exc(file=sys.stderr)
