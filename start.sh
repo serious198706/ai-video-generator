@@ -22,12 +22,25 @@ if [[ -z "${WAN22_FOLEY_ENABLE:-}" ]]; then
 fi
 export WAN22_FOLEY_ENABLE
 
+if [[ -z "${WAN22_UPSCALE_ENABLE:-}" ]]; then
+  if [[ -x "$WAN22_UPSCALE_PYTHON" ]]; then
+    WAN22_UPSCALE_ENABLE=1
+  else
+    WAN22_UPSCALE_ENABLE=0
+  fi
+fi
+export WAN22_UPSCALE_ENABLE
+
 if [[ ! -f "$WAN22_VENV_DIR/bin/activate" ]]; then
   echo "[wan22] 虚拟环境不存在，请先运行 ./deploy.sh" >&2
   exit 1
 fi
 if [[ "$WAN22_FOLEY_ENABLE" == "1" && ! -x "$WAN22_FOLEY_PYTHON" ]]; then
   echo "[wan22] Foley 已打开但 $WAN22_FOLEY_PYTHON 不存在，请先运行 ./deploy.sh" >&2
+  exit 1
+fi
+if [[ "$WAN22_UPSCALE_ENABLE" == "1" && ! -x "$WAN22_UPSCALE_PYTHON" ]]; then
+  echo "[wan22] 超分已打开但 $WAN22_UPSCALE_PYTHON 不存在，请先运行 ./deploy.sh" >&2
   exit 1
 fi
 
@@ -61,6 +74,7 @@ echo "[wan22] layout=$WAN22_LAYOUT host=$WAN22_HOST:$WAN22_PORT"
 echo "[wan22] torch=$(python -c 'import torch; print(torch.__version__, torch.cuda.get_device_name(0) if torch.cuda.is_available() else "no-cuda")')"
 echo "[wan22] model=$WAN22_MODEL_DIR"
 echo "[wan22] foley=$WAN22_FOLEY_ENABLE"
+echo "[wan22] upscale=$WAN22_UPSCALE_ENABLE"
 
 if [[ "${WAN22_DRY_RUN:-0}" != "1" ]]; then
   echo "[wan22] running preflight"

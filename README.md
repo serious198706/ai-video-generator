@@ -2,7 +2,7 @@
 
 给 Java 后端调用的图生视频服务，协议对齐 a2e / Pixverse adapter。
 
-Java 直接打 **GPU FastAPI**（`./start.sh`，默认 `:8000`）。`POST /v1/generate` 在本机收下任务并推理，任务记在进程内存里，不再用 Redis / ElastiCache。推理仍是 WAMU Lightning I2V，画布约 480×832，成片上传到 S3（可用 CloudFront 域名回传 `video_url`）。
+Java 直接打 **GPU FastAPI**（`./start.sh`，默认 `:8000`）。`POST /v1/generate` 在本机收下任务并推理，任务记在进程内存里，不再用 Redis / ElastiCache。推理仍是 WAMU Lightning I2V。480p 画布约 480×832；720p 约 720×1248；`1080p` 先按 720p 生成，再用 SeedVR2 超到约 1080×1872，成片上传到 S3（可用 CloudFront 域名回传 `video_url`）。
 
 ```
 server/
@@ -49,7 +49,7 @@ Java 调用端见 [JAVA.md](JAVA.md)（提交 / 查询 / webhook / 探活）。B
 | `prompt` | 否 | 空则用 `WAN22_DEFAULT_PROMPT` |
 | `negativePrompt` | 否 | 会传给 pipeline；`guidance_scale=1` 时不生效 |
 | `duration` | 否 | `(0, 15]` 秒，默认 5 |
-| `resolution` | 否 | `480p` / `540p` / `720p` / `1080p`。480p 画布约 480×832，720p/1080p 按比例放大 |
+| `resolution` | 否 | `480p` / `540p` / `720p` / `1080p`。480p 画布约 480×832；720p 约 720×1248；1080p 先 720p 再超分 |
 | `webhookUrl` | 否 | 成功和失败都会 POST |
 | `steps` / `quality` / `seed` / `lastImage` | 否 | Wan 私有字段；`quality` 为导出 1–10 |
 | `audio` | 否 | 是否配 Foley，默认 `false`。不传或 `null` 都不配音；传 `true` 才跑 Foley |
@@ -58,7 +58,7 @@ Java 调用端见 [JAVA.md](JAVA.md)（提交 / 查询 / webhook / 探活）。B
 
 图片 URL 必须 https 且解析到公网（防 SSRF）。`WAN22_IMAGE_HOSTS` 有值才限制图床域名。Webhook 走 `WAN22_WEBHOOK_HOSTS`，**允许内网 IP**（Java 就在内网），但仍拒绝链路本地 / `169.254.169.254`；该项为空则不限制 host。
 
-Webhook body 与任务查询字段一致：`id`、`task_id`、`status`、`video_url`、`error`、`seed`、`duration`、`resolution`。失败时 `error` 仅为短码：`generate_failed` / `foley_failed` / `upload_failed` / `download_failed` / `interrupted`。配置了 `WAN22_WEBHOOK_SECRET` 时带 `X-Wan-Signature: sha256=…`。
+Webhook body 与任务查询字段一致：`id`、`task_id`、`status`、`video_url`、`error`、`seed`、`duration`、`resolution`。失败时 `error` 仅为短码：`generate_failed` / `upscale_failed` / `foley_failed` / `upload_failed` / `download_failed` / `interrupted`。配置了 `WAN22_WEBHOOK_SECRET` 时带 `X-Wan-Signature: sha256=…`。
 
 ## 配置
 
@@ -83,7 +83,7 @@ cp .env.example .env
 ./start.sh
 ```
 
-AutoDL 权重、venv、日志在 `/root/autodl-tmp/wan22`。系统盘只有 30G。`start.sh` 监听 `0.0.0.0:8000`，长时间跑请用 `screen`。第一次默认跳过 Foley。
+AutoDL 权重、venv、日志在 `/root/autodl-tmp/wan22`。系统盘只有 30G。`start.sh` 监听 `0.0.0.0:8000`，长时间跑请用 `screen`。第一次默认跳过 Foley。1080p 需要 SeedVR2：`./deploy.sh` 默认会装（`WAN22_UPSCALE_SKIP=0`）。
 
 干净 Ubuntu 26.04（裸金属，没有 DLAMI）先做系统层，再走上面的 `deploy.sh`：
 
@@ -97,7 +97,7 @@ sudo ./bootstrap-ubuntu.sh --install-driver --skip-deploy
 sudo ./bootstrap-ubuntu.sh
 ```
 
-`deploy.sh` 会装 Wan venv 和 WAMU 权重。AutoDL 继承镜像 `torch 2.12.1+cu130`，不装 cu128；EC2 仍装 cu128。Foley 在 AutoDL 默认跳过（`WAN22_FOLEY_SKIP=1`）；现网检测到 Foley python 后 `start.sh` 默认打开。不要 Foley：`.env` 里 `WAN22_FOLEY_ENABLE=0`。
+`deploy.sh` 会装 Wan venv 和 WAMU 权重。AutoDL 继承镜像 `torch 2.12.1+cu130`，不装 cu128；EC2 仍装 cu128。Foley 在 AutoDL 默认跳过（`WAN22_FOLEY_SKIP=1`）；现网检测到 Foley python 后 `start.sh` 默认打开。不要 Foley：`.env` 里 `WAN22_FOLEY_ENABLE=0`。SeedVR2 默认安装；不要 1080p：`WAN22_UPSCALE_SKIP=1` 且 `WAN22_UPSCALE_ENABLE=0`。
 
 本机 dry-run（不需要 GPU / Redis）：
 
@@ -140,6 +140,10 @@ GPU 本机异常告警、Mac 上每小时/每日抽日志，见 [ops/README.md](
 `deploy.sh` 装好后，worker 在成片上传前：把 Wan 挪到 CPU → HunyuanVideo-Foley XL 看视频出 wav（固定 `WAN22_FOLEY_PROMPT`，不用视频 prompt）→ ffmpeg 并轨 → Wan 回到 GPU。
 
 Foley 钉了旧版 transformers，venv 与 Wan 分开。Sidecar 常驻，权重闲时放 CPU。`WAN22_FOLEY_REQUIRED=0`（默认）时 Foley 失败仍上传无声片；`=1` 则 `failed` / `foley_failed`。需要 `WAN22_OFFLOAD=none`。
+
+## 1080p
+
+`resolution=1080p` 不会把 Lightning 画布拉到 1080×1872。worker 先按 720p 出无声片，把 Wan 挪到 CPU，SeedVR2-3B FP8 sidecar 按短边 1.5× 超分（竖屏约 1080×1872），再配 Foley、上传。超分失败短码 `upscale_failed`，不退回 720p。没装超分时 POST 1080p 返回 503。第一次 1080p 会加载超分权重，后面复用。
 
 ## 已知约束
 

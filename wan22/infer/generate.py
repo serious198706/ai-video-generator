@@ -146,6 +146,10 @@ def _validate_config() -> None:
         raise ValueError("WAN22_FOLEY_STEPS must be greater than 0")
     if config.FOLEY_TIMEOUT < 1:
         raise ValueError("WAN22_FOLEY_TIMEOUT must be greater than 0")
+    if config.UPSCALE_TIMEOUT < 1:
+        raise ValueError("WAN22_UPSCALE_TIMEOUT must be greater than 0")
+    if config.UPSCALE_BATCH < 1:
+        raise ValueError("WAN22_UPSCALE_BATCH must be greater than 0")
     if config.NUM_STEPS < 1:
         raise ValueError("WAN22_STEPS must be greater than 0")
     if config.FPS < 1:
@@ -173,8 +177,10 @@ def _validate_config() -> None:
     ):
         if value < 0:
             raise ValueError(f"{name} must not be negative")
-    if config.FOLEY_ENABLE and config.OFFLOAD != "none":
-        raise ValueError("Foley requires WAN22_OFFLOAD=none, Wan must be moved to CPU after generation")
+    if (config.FOLEY_ENABLE or config.UPSCALE_ENABLE) and config.OFFLOAD != "none":
+        raise ValueError(
+            "Foley/upscale requires WAN22_OFFLOAD=none, Wan must be moved to CPU after generation"
+        )
 
 
 def preflight() -> None:
@@ -211,6 +217,11 @@ def preflight() -> None:
         from wan22.infer import foley as foley_mod
 
         foley_mod.preflight()
+
+    if config.UPSCALE_ENABLE:
+        from wan22.infer import upscale as upscale_mod
+
+        upscale_mod.preflight()
 
     logger.info(
         "last_image support=%s steps=%s cfg=%s/%s",
@@ -341,7 +352,7 @@ def load_pipe():
 
 
 def pause_gpu() -> None:
-    """把 Wan pipeline 挪到 CPU，把显存让给 Foley。"""
+    """把 Wan pipeline 挪到 CPU，把显存让给超分 / Foley。"""
     import torch
 
     with _pipe_lock:
@@ -354,7 +365,7 @@ def pause_gpu() -> None:
 
 
 def resume_gpu() -> None:
-    """Foley 结束后把 Wan 放回 GPU。"""
+    """超分 / Foley 结束后把 Wan 放回 GPU。"""
     with _pipe_lock:
         if _pipe is None:
             return
@@ -432,6 +443,14 @@ def dims_for_resolution(resolution: str | None) -> tuple[int, int, int]:
         "1080p": (1080, 1872, 1440),
     }
     return mapping.get(key, mapping["480p"])
+
+
+def generate_dims(resolution: str | None) -> tuple[int, int, int]:
+    """I2V 画布。1080p 在官方 720p 上生成，再超分到输出尺寸。"""
+    key = (resolution or "480p").lower()
+    if key == "1080p":
+        key = "720p"
+    return dims_for_resolution(key)
 
 
 def _resize_for_wan(
@@ -519,9 +538,9 @@ def generate_video(
             raise ValueError("last_frame must be provided with first_frame")
         raise ValueError("WAMU I2V must provide first_frame")
     if config.DRY_RUN:
-        min_dim, max_dim, _square = dims_for_resolution(resolution)
+        min_dim, max_dim, _square = generate_dims(resolution)
         logger.info(
-            "dry-run placeholder seed=%s duration=%s resolution=%s min=%s max=%s",
+            "dry-run placeholder seed=%s duration=%s resolution=%s canvas=%sx%s",
             used_seed,
             duration,
             resolution or "480p",
@@ -536,7 +555,7 @@ def generate_video(
     from wan22.media.image import open_rgb
 
     pipe = load_pipe()
-    min_dim, max_dim, square_dim = dims_for_resolution(resolution)
+    min_dim, max_dim, square_dim = generate_dims(resolution)
     image = _resize_for_wan(
         open_rgb(first_frame_path),
         pipe,

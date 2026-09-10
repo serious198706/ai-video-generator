@@ -7,6 +7,7 @@ from pathlib import Path
 from wan22 import config
 from wan22.infer import generate
 from wan22.infer.foley import FoleyError, add_audio
+from wan22.infer.upscale import UpscaleError, upscale_video
 from wan22.log import get_logger
 from wan22.media import download, webhook
 from wan22.media.upload import upload_video
@@ -106,8 +107,9 @@ def _run(task_id: str) -> None:
     try:
         first_path = _ensure_image(task, "first")
         last_path = _ensure_image(task, "last") if task.get("last_image_url") else last_path
-        generate_s = foley_s = upload_s = 0.0
+        generate_s = foley_s = upscale_s = upload_s = 0.0
         foley_ok = 0
+        upscale_ok = 0
         used_seed = task.get("seed")
         gen_started = time.monotonic()
         try:
@@ -137,31 +139,59 @@ def _run(task_id: str) -> None:
             return
         generate_s = time.monotonic() - gen_started
 
-        if config.FOLEY_ENABLE and not config.DRY_RUN and bool(task.get("audio")):
-            foley_failed = False
-            foley_t = time.monotonic()
+        needs_upscale = (task.get("resolution") or "").lower() == "1080p" and not config.DRY_RUN
+        needs_foley = config.FOLEY_ENABLE and not config.DRY_RUN and bool(task.get("audio"))
+        if needs_upscale or needs_foley:
+            generate.pause_gpu()
             try:
-                generate.pause_gpu()
-                foley_ok = int(bool(add_audio(output)))
-            except FoleyError:
-                foley_failed = True
-                logger.exception("foley required and failed task=%s", task_id)
+                if needs_upscale:
+                    upscale_t = time.monotonic()
+                    try:
+                        upscale_video(output)
+                        upscale_ok = 1
+                    except UpscaleError:
+                        logger.exception("upscale failed task=%s", task_id)
+                        upscale_s = time.monotonic() - upscale_t
+                        _log_timing(
+                            task,
+                            status="failed",
+                            error="upscale_failed",
+                            seed=used_seed,
+                            total_s=time.monotonic() - gen_started,
+                            generate_s=generate_s,
+                            upscale_s=upscale_s,
+                            upscale_ok=0,
+                        )
+                        _fail_or_retry(task_id, "upscale_failed")
+                        return
+                    upscale_s = time.monotonic() - upscale_t
+                if needs_foley:
+                    foley_failed = False
+                    foley_t = time.monotonic()
+                    try:
+                        foley_ok = int(bool(add_audio(output)))
+                    except FoleyError:
+                        foley_failed = True
+                        logger.exception("foley required and failed task=%s", task_id)
+                    finally:
+                        foley_s = time.monotonic() - foley_t
+                    if foley_failed:
+                        _log_timing(
+                            task,
+                            status="failed",
+                            error="foley_failed",
+                            seed=used_seed,
+                            total_s=time.monotonic() - gen_started,
+                            generate_s=generate_s,
+                            upscale_s=upscale_s,
+                            upscale_ok=upscale_ok,
+                            foley_s=foley_s,
+                            foley_ok=0,
+                        )
+                        _fail_or_retry(task_id, "foley_failed")
+                        return
             finally:
                 generate.resume_gpu()
-                foley_s = time.monotonic() - foley_t
-            if foley_failed:
-                _log_timing(
-                    task,
-                    status="failed",
-                    error="foley_failed",
-                    seed=used_seed,
-                    total_s=time.monotonic() - gen_started,
-                    generate_s=generate_s,
-                    foley_s=foley_s,
-                    foley_ok=0,
-                )
-                _fail_or_retry(task_id, "foley_failed")
-                return
 
         upload_t = time.monotonic()
         if config.DRY_RUN:
@@ -182,6 +212,8 @@ def _run(task_id: str) -> None:
             seed=used_seed,
             total_s=total_s,
             generate_s=generate_s,
+            upscale_s=upscale_s,
+            upscale_ok=upscale_ok,
             foley_s=foley_s,
             upload_s=upload_s,
             foley_ok=foley_ok,
@@ -238,8 +270,10 @@ def _log_timing(
     seed,
     total_s: float,
     generate_s: float = 0.0,
+    upscale_s: float = 0.0,
     foley_s: float = 0.0,
     upload_s: float = 0.0,
+    upscale_ok: int = 0,
     foley_ok: int = 0,
     error: str | None = None,
 ) -> None:
@@ -257,6 +291,7 @@ def _log_timing(
         f"status={status}",
         f"total_s={total_s:.3f}",
         f"generate_s={generate_s:.3f}",
+        f"upscale_s={upscale_s:.3f}",
         f"foley_s={foley_s:.3f}",
         f"upload_s={upload_s:.3f}",
         f"duration={task.get('duration')}",
@@ -270,6 +305,8 @@ def _log_timing(
         f"foley_ok={foley_ok}",
         f"foley_steps={config.FOLEY_STEPS if foley_on else 0}",
         f"foley_size={config.FOLEY_SIZE if foley_on else '-'}",
+        f"upscale={1 if (task.get('resolution') or '').lower() == '1080p' and not config.DRY_RUN else 0}",
+        f"upscale_ok={upscale_ok}",
     ]
     if error:
         fields.append(f"error={error}")

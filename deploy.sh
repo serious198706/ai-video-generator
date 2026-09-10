@@ -23,6 +23,7 @@ if [[ -z "${WAN22_FOLEY_SKIP:-}" ]]; then
 else
   FOLEY_SKIP="$WAN22_FOLEY_SKIP"
 fi
+UPSCALE_SKIP="${WAN22_UPSCALE_SKIP:-0}"
 
 _python() {
   if [[ -x "$WAN22_PYTHON" ]]; then
@@ -210,6 +211,51 @@ PY
   echo "[wan22] downloading HunyuanVideo-Foley weights"
   hf download --token $HF_TOKEN tencent/HunyuanVideo-Foley \
     --local-dir "$WAN22_FOLEY_MODEL_DIR"
+fi
+
+if [[ "$UPSCALE_SKIP" == "1" ]]; then
+  echo "[wan22] WAN22_UPSCALE_SKIP=1, skip SeedVR2"
+else
+  if [[ -z "${WAN22_UPSCALE_REPO:-}" ]]; then
+    echo "[wan22] WAN22_UPSCALE_REPO is empty" >&2
+    exit 1
+  fi
+  if [[ ! -f "$WAN22_UPSCALE_REPO/inference_cli.py" ]]; then
+    echo "[wan22] cloning SeedVR2: $WAN22_UPSCALE_REPO"
+    git clone --depth 1 \
+      https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler.git \
+      "$WAN22_UPSCALE_REPO"
+  elif [[ -d "$WAN22_UPSCALE_REPO/.git" ]]; then
+    echo "[wan22] updating SeedVR2: $WAN22_UPSCALE_REPO"
+    git -C "$WAN22_UPSCALE_REPO" pull --ff-only || \
+      echo "[wan22] SeedVR2 repo not fast-forward, keep local clone" >&2
+  else
+    echo "[wan22] SeedVR2 repo already present: $WAN22_UPSCALE_REPO"
+  fi
+
+  if [[ ! -f "$WAN22_UPSCALE_VENV_DIR/bin/python" ]]; then
+    echo "[wan22] creating SeedVR2 virtual environment: $WAN22_UPSCALE_VENV_DIR"
+    upscale_venv_args=()
+    if [[ "${WAN22_VENV_SYSTEM_SITE}" == "1" ]]; then
+      upscale_venv_args+=(--system-site-packages)
+    fi
+    "$BASE_PY" -m venv "${upscale_venv_args[@]}" "$WAN22_UPSCALE_VENV_DIR"
+  fi
+
+  UPSCALE_PY="$WAN22_UPSCALE_PYTHON"
+  echo "[wan22] SeedVR2 pip using $UPSCALE_PY"
+  "$UPSCALE_PY" -m pip install --upgrade pip setuptools wheel
+  if [[ "${WAN22_INSTALL_TORCH}" == "1" ]]; then
+    "$UPSCALE_PY" -m pip install --upgrade torch torchvision \
+      --index-url https://download.pytorch.org/whl/cu128
+  fi
+  "$UPSCALE_PY" -m pip install --upgrade -r "$WAN22_UPSCALE_REPO/requirements.txt"
+  mkdir -p "$WAN22_UPSCALE_MODEL_DIR"
+  echo "[wan22] downloading SeedVR2 3B FP8 + VAE"
+  hf download --token $HF_TOKEN numz/SeedVR2_comfyUI \
+    seedvr2_ema_3b_fp8_e4m3fn.safetensors \
+    ema_vae_fp16.safetensors \
+    --local-dir "$WAN22_UPSCALE_MODEL_DIR"
 fi
 
 echo "[wan22] deployment complete; run: $SCRIPT_DIR/start.sh"

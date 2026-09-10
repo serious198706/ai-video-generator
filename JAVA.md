@@ -20,7 +20,7 @@ Content-Type: application/json
 | prompt | string | 否 | 空或省略则用服务端默认提示词 |
 | negativePrompt | string | 否 | 会传给模型 |
 | duration | number | 否 | 秒，`(0, 15]`，默认 5。可写 5 或 5.0 |
-| resolution | string | 否 | `480p` / `540p` / `720p` / `1080p`。480p/540p 画布约 480×832；720p 约 720×1248；1080p 约 1080×1872 |
+| resolution | string | 否 | `480p` / `540p` / `720p` / `1080p`。480p/540p 画布约 480×832；720p 约 720×1248；1080p 先按 720p 生成再超分到约 1080×1872 |
 | webhookUrl | string | 否 | 成功、失败都会 POST。必须 https。配置了 `WAN22_WEBHOOK_HOSTS` 时 host 须在名单内（允许内网）；空则不限制 host |
 | steps | integer | 否 | 1–50，不传则用服务端默认 |
 | quality | integer | 否 | 导出质量 1–10 |
@@ -75,7 +75,7 @@ Content-Type: application/json
 | 400 | 图 / webhook URL 不合法：非 https、图解析到私网；配置了白名单时 host 不在名单内 |
 | 422 | 字段类型或范围不对（duration 超 15、resolution 不是那三个枚举等） |
 | 429 | 待跑任务 ≥ 500 |
-| 503 | 服务未就绪 |
+| 503 | 服务未就绪；或要了 1080p 但机器没装 SeedVR2 |
 
 ---
 
@@ -125,6 +125,7 @@ error 短码（不要当给人看的长文案）：
 | 值 | 说明 |
 | --- | --- |
 | generate_failed | 推理失败（含重试仍失败） |
+| upscale_failed | 720p 成片后超分到 1080p 失败 |
 | foley_failed | 成片后配 Foley 失败（仅 `WAN22_FOLEY_REQUIRED=1`） |
 | upload_failed | 成片上传 S3 失败 |
 | download_failed | GPU 下图失败 |

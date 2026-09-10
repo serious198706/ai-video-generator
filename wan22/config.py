@@ -108,6 +108,24 @@ FOLEY_STEPS = int(os.environ.get("WAN22_FOLEY_STEPS", "50"))
 FOLEY_GUIDANCE = float(os.environ.get("WAN22_FOLEY_GUIDANCE", "4.5"))
 FOLEY_TIMEOUT = int(os.environ.get("WAN22_FOLEY_TIMEOUT", "180"))
 
+UPSCALE_ENABLE = os.environ.get("WAN22_UPSCALE_ENABLE", "0") == "1"
+UPSCALE_PYTHON = os.environ.get("WAN22_UPSCALE_PYTHON", "").strip()
+UPSCALE_REPO = (
+    Path(os.environ.get("WAN22_UPSCALE_REPO", "")).expanduser()
+    if os.environ.get("WAN22_UPSCALE_REPO")
+    else None
+)
+UPSCALE_MODEL_DIR = Path(
+    os.environ.get("WAN22_UPSCALE_MODEL_DIR", "/data/models/seedvr2")
+).expanduser()
+UPSCALE_DIT = os.environ.get(
+    "WAN22_UPSCALE_MODEL",
+    "seedvr2_ema_3b_fp8_e4m3fn.safetensors",
+).strip()
+UPSCALE_TIMEOUT = int(os.environ.get("WAN22_UPSCALE_TIMEOUT", "900"))
+UPSCALE_BATCH = int(os.environ.get("WAN22_UPSCALE_BATCH", "21"))
+UPSCALE_CHUNK = int(os.environ.get("WAN22_UPSCALE_CHUNK", "0"))
+
 DEFAULT_PROMPT = os.environ.get(
     "WAN22_DEFAULT_PROMPT",
     "make this image come alive, cinematic motion, smooth animation",
