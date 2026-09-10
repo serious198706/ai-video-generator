@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 from wan22 import config
@@ -25,6 +26,18 @@ class UpscaleError(RuntimeError):
 def snap_4n1(value: int) -> int:
     value = max(1, int(value))
     return ((value - 1) // 4) * 4 + 1
+
+
+def decode_json_line(raw: str) -> dict | None:
+    """协议行必须是 JSON 对象。SeedVR2 的 print 提示直接丢掉。"""
+    text = (raw or "").strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def target_short_side(width: int, height: int) -> int:
@@ -150,6 +163,7 @@ def _ensure() -> None:
     env = os.environ.copy()
     repo = str(config.UPSCALE_REPO)
     env["PYTHONPATH"] = repo + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHONUNBUFFERED"] = "1"
     _proc = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
@@ -186,26 +200,32 @@ def _readline(timeout: int) -> dict:
     proc = _proc
     if proc is None or proc.stdout is None:
         raise UpscaleError("sidecar stdout unavailable")
-    line: list[str] = []
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _kill()
+            raise UpscaleError(f"sidecar timeout: {timeout}s")
+        line: list[str] = []
 
-    def _read() -> None:
-        line.append(proc.stdout.readline())
+        def _read() -> None:
+            line.append(proc.stdout.readline())
 
-    reader = threading.Thread(target=_read, daemon=True)
-    reader.start()
-    reader.join(timeout)
-    if reader.is_alive():
-        _kill()
-        raise UpscaleError(f"sidecar timeout: {timeout}s")
-    raw = line[0] if line else ""
-    if not raw:
-        code = proc.poll()
-        _kill()
-        raise UpscaleError(f"sidecar exited with code={code}")
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise UpscaleError(f"sidecar not JSON: {raw[:200]!r}") from exc
+        reader = threading.Thread(target=_read, daemon=True)
+        reader.start()
+        reader.join(remaining)
+        if reader.is_alive():
+            _kill()
+            raise UpscaleError(f"sidecar timeout: {timeout}s")
+        raw = line[0] if line else ""
+        if raw == "":
+            code = proc.poll()
+            _kill()
+            raise UpscaleError(f"sidecar exited with code={code}")
+        payload = decode_json_line(raw)
+        if payload is not None:
+            return payload
+        logger.info("upscale sidecar stdout: %s", raw.strip()[:300])
 
 
 def _drain_stderr(proc: subprocess.Popen) -> None:

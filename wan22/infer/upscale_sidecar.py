@@ -18,13 +18,21 @@ import traceback
 from pathlib import Path
 
 
+_JSON_OUT = sys.stdout
+
+
 def _log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
 
+def _silence_library_stdout() -> None:
+    """SeedVR2 会往 stdout 打 sageattention 提示，污染 JSON 协议。"""
+    sys.stdout = sys.stderr
+
+
 def _reply(payload: dict) -> None:
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    _JSON_OUT.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    _JSON_OUT.flush()
 
 
 def _snap_4n1(value: int) -> int:
@@ -96,6 +104,7 @@ def main() -> int:
     parser.add_argument("--model-dir", required=True)
     parser.add_argument("--dit-model", required=True)
     boot = parser.parse_args()
+    _silence_library_stdout()
 
     repo = Path(boot.repo).expanduser().resolve()
     os.chdir(repo)

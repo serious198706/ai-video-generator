@@ -11,7 +11,12 @@ os.environ.setdefault("WAN22_PRELOAD", "0")
 os.environ.setdefault("WAN22_UPSCALE_ENABLE", "0")
 sys.path.insert(0, str(ROOT))
 
-from wan22.infer.upscale import snap_4n1, target_max_edge, target_short_side  # noqa: E402
+from wan22.infer.upscale import (  # noqa: E402
+    decode_json_line,
+    snap_4n1,
+    target_max_edge,
+    target_short_side,
+)
 
 
 class UpscaleHelperTests(unittest.TestCase):
@@ -28,6 +33,10 @@ class UpscaleHelperTests(unittest.TestCase):
     def test_square_720p_scales_to_1440(self):
         self.assertEqual(target_short_side(960, 960), 1440)
         self.assertEqual(target_max_edge(960, 960), 1440)
+
+    def test_decode_json_line_skips_seedvr2_tips(self):
+        self.assertIsNone(decode_json_line("💡 Optional: pip install sageattention flash-attn\n"))
+        self.assertEqual(decode_json_line('{"ok": true, "ready": true}\n'), {"ok": True, "ready": True})
 
 
 if __name__ == "__main__":
