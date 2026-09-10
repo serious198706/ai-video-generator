@@ -2,17 +2,16 @@
 
 给 Java 后端调用的图生视频服务，协议对齐 a2e / Pixverse adapter。
 
-Java 打 **API Gateway + Lambda** 接单；GPU 只做推理 worker。队列是 **ElastiCache Redis**（List 排队 + String 存任务/结果）。推理仍是 WAMU Lightning I2V，画布约 480×832，成片上传到 S3（可用 CloudFront 域名回传 `video_url`）。
+Java 直接打 **GPU FastAPI**（`./start.sh`，默认 `:8000`）。`POST /v1/generate` 在本机收下任务并推理，任务记在进程内存里，不再用 Redis / ElastiCache。推理仍是 WAMU Lightning I2V，画布约 480×832，成片上传到 S3（可用 CloudFront 域名回传 `video_url`）。
 
 ```
 server/
   start.sh deploy.sh requirements.txt .env.example README.md JAVA.md
-  lambda_api/   API Gateway → Lambda（校验 URL、入队、查询；不下图）
   wan22/
     config.py
     log.py        按日滚动的 wan22.log
-    api/          GPU 本机 /health /ready（不给 Java 接单）
-    queue/        Redis 任务与 GPU worker
+    api/          POST /v1/generate、查询任务、/health /ready
+    queue/        本机内存任务 + 串行 worker
     infer/        Wan pipeline
     media/        下图、上传、webhook
     net/          URL 白名单 / SSRF
@@ -20,9 +19,9 @@ server/
 
 ## 协议
 
-Java 调用端见 [JAVA.md](JAVA.md)（提交 / 查询 / webhook / 探活）。Lambda 部署见 [lambda_api/README.md](lambda_api/README.md)。
+Java 调用端见 [JAVA.md](JAVA.md)（提交 / 查询 / webhook / 探活）。Base URL 用 GPU 的 `http://<host>:8000`。
 
-`POST /v1/generate`，`application/json`，无鉴权。立刻 `202`（**不下图**，只校验 HTTPS/白名单并 `RPUSH`）：
+`POST /v1/generate`，`application/json`，无鉴权。立刻 `202`（校验 HTTPS/白名单后入本机任务表，后台下图并推理）：
 
 ```json
 { "id": "…", "task_id": "…", "status": "queued" }
@@ -46,16 +45,16 @@ Java 调用端见 [JAVA.md](JAVA.md)（提交 / 查询 / webhook / 探活）。L
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
-| `image` | 是 | HTTPS 图片 URL（JPEG / PNG / WebP / GIF 等）；Lambda 只校验，GPU `LPOP` 后下载并转成 JPEG |
+| `image` | 是 | HTTPS 图片 URL（JPEG / PNG / WebP / GIF 等）；接口校验后由本机 worker 下载并转成 JPEG |
 | `prompt` | 否 | 空则用 `WAN22_DEFAULT_PROMPT` |
 | `negativePrompt` | 否 | 会传给 pipeline；`guidance_scale=1` 时不生效 |
 | `duration` | 否 | `(0, 15]` 秒，默认 5 |
-| `resolution` | 否 | `540p` / `720p` / `1080p`，本轮只记录，画布仍 480×832 |
+| `resolution` | 否 | `480p` / `540p` / `720p` / `1080p`。480p 画布约 480×832，720p/1080p 按比例放大 |
 | `webhookUrl` | 否 | 成功和失败都会 POST |
 | `steps` / `quality` / `seed` / `lastImage` | 否 | Wan 私有字段；`quality` 为导出 1–10 |
 | `audio` | 否 | 是否配 Foley，默认 `false`。不传或 `null` 都不配音；传 `true` 才跑 Foley |
 
-`GET /v1/tasks/{id}` 读 Redis String。Lambda `/health` Ping Redis，不再因「模型未就绪」503。GPU 本机 `/ready` 仅运维用。`/docs` 默认关闭。
+`GET /v1/tasks/{id}` 读本机任务。`/health` 探活；`/ready` 在模型未加载时 503。`/docs` 默认关闭。
 
 图片 URL 必须 https 且解析到公网（防 SSRF）。`WAN22_IMAGE_HOSTS` 有值才限制图床域名。Webhook 走 `WAN22_WEBHOOK_HOSTS`，**允许内网 IP**（Java 就在内网），但仍拒绝链路本地 / `169.254.169.254`；该项为空则不限制 host。
 
@@ -67,22 +66,19 @@ Webhook body 与任务查询字段一致：`id`、`task_id`、`status`、`video_
 
 必填：
 
-- `WAN22_REDIS_URL`（ElastiCache Serverless 用 `rediss://`）
-- `WAN22_S3_BUCKET`（GPU 非 DRY_RUN 启动时必填）
+- `WAN22_S3_BUCKET`（非 DRY_RUN 启动时必填）
 
-`WAN22_IMAGE_HOSTS` / `WAN22_WEBHOOK_HOSTS` 可选。逗号分隔，`.cloudfront.net` 这种写法按后缀匹配。**空或不设则不限制 host**；仍要求 https。图片继续拒绝私网（防 SSRF）；webhook 允许内网，拒绝链路本地。Lambda 与 GPU 各自读自己的环境变量，要放开图床时两边都清空。
+`WAN22_IMAGE_HOSTS` / `WAN22_WEBHOOK_HOSTS` 可选。逗号分隔，`.cloudfront.net` 这种写法按后缀匹配。**空或不设则不限制 host**；仍要求 https。图片继续拒绝私网（防 SSRF）；webhook 允许内网，拒绝链路本地。测试时把 `WAN22_IMAGE_HOSTS` 留空或改成你的图床域名。
 
 成片：`WAN22_S3_BUCKET` / `WAN22_S3_REGION` / `WAN22_S3_PREFIX`，回传 URL 用 `WAN22_S3_PUBLIC_BASE_URL`（CloudFront）。凭证走 GPU 机 IAM Role，或标准的 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`。
 
-Lambda 与 GPU 共用 Redis 和白名单；Lambda **必须进 ElastiCache 同一 VPC**。Java Base URL 换成 API Gateway。
-
 ## 启动
 
-GPU 机只跑 worker。路径由 `worker-env.sh` 按机器决定：有 `/root/autodl-tmp` 走 AutoDL 数据盘和镜像 conda Torch；否则现网 EC2 的 `/opt` + `/data`。
+路径由 `worker-env.sh` 按机器决定：有 `/root/autodl-tmp` 走 AutoDL 数据盘和镜像 conda Torch；否则现网 EC2 的 `/opt` + `/data`。
 
 ```bash
 cp .env.example .env
-# 改 Redis / hosts / S3。AutoDL 不要改路径，不要设 WAN22_INSTALL_TORCH=1
+# 改 hosts / S3。AutoDL 不要改路径，不要设 WAN22_INSTALL_TORCH=1
 ./deploy.sh
 ./start.sh
 ```
@@ -103,24 +99,25 @@ sudo ./bootstrap-ubuntu.sh
 
 `deploy.sh` 会装 Wan venv 和 WAMU 权重。AutoDL 继承镜像 `torch 2.12.1+cu130`，不装 cu128；EC2 仍装 cu128。Foley 在 AutoDL 默认跳过（`WAN22_FOLEY_SKIP=1`）；现网检测到 Foley python 后 `start.sh` 默认打开。不要 Foley：`.env` 里 `WAN22_FOLEY_ENABLE=0`。
 
-无 GPU 联调接口（本机 Redis）：
-
-```bash
-export WAN22_REDIS_URL=redis://127.0.0.1:6379/0
-export WAN22_IMAGE_HOSTS=127.0.0.1,localhost
-export WAN22_WEBHOOK_HOSTS=127.0.0.1,localhost
-uvicorn lambda_api.app:app --port 8000
-```
-
-GPU dry-run worker：
+本机 dry-run（不需要 GPU / Redis）：
 
 ```bash
 export WAN22_DRY_RUN=1
-export WAN22_REDIS_URL=redis://127.0.0.1:6379/0
-uvicorn wan22.api.app:app --port 8001
+export WAN22_IMAGE_HOSTS=
+uvicorn wan22.api.app:app --port 8000
 ```
 
 `DRY_RUN` 写占位 mp4，不上传 S3，`video_url` 为 `http://127.0.0.1/dry-run/{id}.mp4`。
+
+测试生成：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/v1/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"image":"https://dxxx.cloudfront.net/a.jpg","prompt":"she turns her head","duration":5}'
+# 用返回的 id 轮询
+curl -sS http://127.0.0.1:8000/v1/tasks/<id>
+```
 
 ## 日志
 
@@ -130,18 +127,13 @@ uvicorn wan22.api.app:app --port 8001
 - 按日滚动：`logs/wan22.log.YYYY-MM-DD`（本地时区午夜，默认保留 30 天）
 - 同时打到 stdout，方便 journald / 终端
 
-记录入队、拒单（400/429/503）、推理开始/结束（含 seed、分辨率、耗时）、上传 URL、webhook 成败、进程重启后重试。uvicorn access 也进同一文件。
+记录接单、拒单（400/429）、推理开始/结束（含 seed、分辨率、耗时）、上传 URL、webhook 成败、进程重启后重试。uvicorn access 也进同一文件。
 
 GPU 本机异常告警、Mac 上每小时/每日抽日志，见 [ops/README.md](ops/README.md)。
 
-## 队列
+## 任务
 
-ElastiCache Redis，哈希标签 `{wan22}`：
-
-- `{wan22}:queue` List：入队 `RPUSH`，GPU `LPOP` 抢任务（不用 BRPOP，Serverless TLS 会掐阻塞读）
-- `{wan22}:task:{id}` String：整份任务 JSON；查询、成功结果、失败状态都更新这把 key
-
-`LLEN(queue) >= WAN22_QUEUE_MAX`（默认 **500**）返回 429；正在跑的不算进这 500。失败最多重试 3 次（含首次）：未超限则 `RPUSH` 回去；`attempts >= 3` 则 `failed` + webhook。进程崩溃只重入本机记下的 `running`，不抢别的机器的任务。
+进程内内存：待跑列表 + 任务字典。单卡串行。待跑数量 ≥ `WAN22_QUEUE_MAX`（默认 **500**）返回 429。失败最多重试 3 次（含首次）；`attempts >= 3` 则 `failed` + webhook。进程退出后内存任务清空。
 
 ## 音频（可选）
 

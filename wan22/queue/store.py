@@ -1,19 +1,13 @@
 from __future__ import annotations
 
-import json
-import socket
+import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import redis
-
 from wan22 import config
-
-# ElastiCache Serverless 按 Cluster slot 校验 MULTI。{wan22} 让 queue / task 同槽。
-QUEUE_KEY = "{wan22}:queue"
-TASK_PREFIX = "{wan22}:task:"
 
 _OPTIONAL = (
     "negative_prompt",
@@ -31,7 +25,9 @@ _OPTIONAL = (
     "worker_id",
 )
 
-_client: redis.Redis | None = None
+_lock = threading.Lock()
+_tasks: dict[str, dict[str, Any]] = {}
+_queue: deque[str] = deque()
 
 
 def _now() -> str:
@@ -39,7 +35,7 @@ def _now() -> str:
 
 
 def _worker_id() -> str:
-    return getattr(config, "WORKER_ID", None) or f"{socket.gethostname()}"
+    return getattr(config, "WORKER_ID", None) or "gpu"
 
 
 def _running_file() -> Path:
@@ -47,118 +43,68 @@ def _running_file() -> Path:
     return config.ROOT / f"worker-running.{safe}"
 
 
-def client() -> redis.Redis:
-    global _client
-    if _client is None:
-        # Serverless TLS 会掐空闲连接。LPOP 非阻塞，必须设 socket_timeout，
-        # 否则成片几十秒没人碰 Redis，下一次 GET/SET 会永远卡住。
-        _client = redis.Redis.from_url(
-            config.REDIS_URL,
-            decode_responses=True,
-            socket_connect_timeout=3,
-            socket_timeout=3,
-            socket_keepalive=True,
-            health_check_interval=30,
-            # 单次命令不要内部再重试：5s×2 会吃光 Lambda 10s，日志只剩 timeout。
-            retry_on_timeout=False,
-        )
-    return _client
-
-
-def reset_client() -> None:
-    global _client
-    old = _client
-    _client = None
-    if old is None:
-        return
-    try:
-        old.close()
-    except Exception:
-        pass
+def _normalize(task: dict[str, Any]) -> dict[str, Any]:
+    out = dict(task)
+    if out.get("duration") is not None:
+        out["duration"] = float(out["duration"])
+    for key in ("seed", "steps", "quality", "attempts"):
+        if out.get(key) is not None and out.get(key) != "":
+            out[key] = int(out[key])
+        elif key == "attempts":
+            out[key] = 0
+    out["audio"] = bool(out.get("audio"))
+    for key in _OPTIONAL:
+        if out.get(key) in ("",):
+            out[key] = None
+    return out
 
 
 def ping() -> None:
-    """只 ping 一次。失败原样抛出，避免卡到 Lambda 超时却没有任何错误日志。"""
-    client().ping()
+    return None
 
 
-def _retry(op):
-    try:
-        return op()
-    except (redis.TimeoutError, redis.ConnectionError, OSError):
-        reset_client()
-        return op()
-
-
-def task_key(task_id: str) -> str:
-    return f"{TASK_PREFIX}{task_id}"
-
-
-def _load(raw: str | None) -> dict[str, Any] | None:
-    if not raw:
-        return None
-    task = json.loads(raw)
-    if task.get("duration") is not None:
-        task["duration"] = float(task["duration"])
-    for key in ("seed", "steps", "quality", "attempts"):
-        if task.get(key) is not None and task.get(key) != "":
-            task[key] = int(task[key])
-        elif key == "attempts":
-            task[key] = 0
-    task["audio"] = bool(task.get("audio"))
-    for key in _OPTIONAL:
-        if task.get(key) in ("",):
-            task[key] = None
-    return task
-
-
-def _dump_task(task: dict[str, Any]) -> str:
-    return json.dumps(task, ensure_ascii=False, default=str)
+def reset_client() -> None:
+    return None
 
 
 def create_task(task_id: str, fields: dict[str, Any]) -> dict[str, Any]:
     now = _now()
-    payload = {
-        "id": task_id,
-        "status": "queued",
-        "attempts": 0,
-        "created_at": now,
-        "updated_at": now,
-        "worker_id": None,
-        "prompt": fields.get("prompt"),
-        "negative_prompt": fields.get("negative_prompt"),
-        "image_url": fields.get("image_url"),
-        "last_image_url": fields.get("last_image_url"),
-        "first_frame_path": fields.get("first_frame_path"),
-        "last_frame_path": fields.get("last_frame_path"),
-        "duration": fields.get("duration"),
-        "resolution": fields.get("resolution"),
-        "webhook_url": fields.get("webhook_url"),
-        "seed": fields.get("seed"),
-        "steps": fields.get("steps"),
-        "quality": fields.get("quality"),
-        "audio": bool(fields.get("audio")),
-        "video_url": None,
-        "error": None,
-    }
-
-    def _create() -> None:
-        pipe = client().pipeline()
-        pipe.set(task_key(task_id), _dump_task(payload))
-        pipe.rpush(QUEUE_KEY, task_id)
-        pipe.execute()
-
-    _retry(_create)
+    payload = _normalize(
+        {
+            "id": task_id,
+            "status": "queued",
+            "attempts": 0,
+            "created_at": now,
+            "updated_at": now,
+            "worker_id": None,
+            "prompt": fields.get("prompt"),
+            "negative_prompt": fields.get("negative_prompt"),
+            "image_url": fields.get("image_url"),
+            "last_image_url": fields.get("last_image_url"),
+            "first_frame_path": fields.get("first_frame_path"),
+            "last_frame_path": fields.get("last_frame_path"),
+            "duration": fields.get("duration"),
+            "resolution": fields.get("resolution"),
+            "webhook_url": fields.get("webhook_url"),
+            "seed": fields.get("seed"),
+            "steps": fields.get("steps"),
+            "quality": fields.get("quality"),
+            "audio": bool(fields.get("audio")),
+            "video_url": None,
+            "error": None,
+        }
+    )
+    with _lock:
+        _tasks[task_id] = payload
+        _queue.append(task_id)
     return get_task(task_id)  # type: ignore[return-value]
 
 
 def update_task(task_id: str, **fields: Any) -> None:
     if not fields:
         return
-
-    def _update() -> None:
-        raw = client().get(task_key(task_id))
-        task = _load(raw)
+    with _lock:
+        task = _tasks.get(task_id)
         if not task:
             return
         for key, value in fields.items():
@@ -166,37 +112,29 @@ def update_task(task_id: str, **fields: Any) -> None:
                 value = None
             task[key] = value
         task["updated_at"] = _now()
-        client().set(task_key(task_id), _dump_task(task))
-
-    _retry(_update)
+        _tasks[task_id] = _normalize(task)
 
 
 def get_task(task_id: str) -> dict[str, Any] | None:
-    raw = _retry(lambda: client().get(task_key(task_id)))
-    return _load(raw)
+    with _lock:
+        task = _tasks.get(task_id)
+        return _normalize(task) if task else None
 
 
 def pending() -> int:
-    return int(_retry(lambda: client().llen(QUEUE_KEY)) or 0)
+    with _lock:
+        return len(_queue)
 
 
 def pop_task(timeout: int = 5) -> str | None:
-    """RPUSH + LPOP。Serverless 上 BRPOP 会被 TLS 读超时打死。LPOP 即抢锁。"""
     deadline = time.monotonic() + max(timeout, 0)
     while True:
-        try:
-            item = client().lpop(QUEUE_KEY)
-        except (redis.TimeoutError, redis.ConnectionError, OSError):
-            reset_client()
-            if time.monotonic() >= deadline:
-                return None
-            time.sleep(0.25)
-            continue
-        if item is not None:
-            return item
+        with _lock:
+            if _queue:
+                return _queue.popleft()
         if time.monotonic() >= deadline:
             return None
-        time.sleep(0.25)
+        time.sleep(0.05)
 
 
 def set_running(task_id: str) -> None:
@@ -214,7 +152,6 @@ def clear_running(task_id: str | None = None) -> None:
 
 
 def take_interrupted() -> str | None:
-    """本机上次没跑完的 running。不抢其它机器的任务。"""
     path = _running_file()
     if not path.is_file():
         return None
@@ -224,11 +161,8 @@ def take_interrupted() -> str | None:
 
 
 def requeue(task_id: str, *, attempts: int, error: str | None = None) -> None:
-    """失败未超限：写回 queued 并 RPUSH。"""
-
-    def _requeue() -> None:
-        raw = client().get(task_key(task_id))
-        task = _load(raw)
+    with _lock:
+        task = _tasks.get(task_id)
         if not task:
             return
         task["status"] = "queued"
@@ -236,9 +170,5 @@ def requeue(task_id: str, *, attempts: int, error: str | None = None) -> None:
         task["error"] = error
         task["worker_id"] = None
         task["updated_at"] = _now()
-        pipe = client().pipeline()
-        pipe.set(task_key(task_id), _dump_task(task))
-        pipe.rpush(QUEUE_KEY, task_id)
-        pipe.execute()
-
-    _retry(_requeue)
+        _tasks[task_id] = _normalize(task)
+        _queue.append(task_id)

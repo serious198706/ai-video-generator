@@ -1,6 +1,6 @@
-内网图生视频，无鉴权。Base URL 用 **API Gateway**（不要再打 GPU `:8000`）。
+内网图生视频，无鉴权。Base URL 用 **GPU FastAPI**（`./start.sh`，默认 `:8000`）。
 
-可空字段 JSON 里是 `null`（不要用缺 key 判断）。数字不要加引号。`POST /v1/generate` **只校验 URL 并入 Redis 队列，不下图**，超时可以比 30s 短。单卡串行，不要同步死等成片。
+可空字段 JSON 里是 `null`（不要用缺 key 判断）。数字不要加引号。`POST /v1/generate` 立刻 `202`，本机后台下图并推理，不要同步死等成片。单卡串行。
 
 ---
 
@@ -16,11 +16,11 @@ Content-Type: application/json
 
 | 字段名 | 类型 | 必须 | 说明 |
 | --- | --- | --- | --- |
-| image | string | 是 | 首帧 HTTPS URL，须解析到公网。JPEG / PNG / WebP / GIF 等 Pillow 能开的格式均可，GPU 下载后会转成 JPEG。配置了 `WAN22_IMAGE_HOSTS` 时 host 须在名单内；空则任意公网 https。接口只校验，GPU 出队后再下载。不要传 base64 / multipart |
+| image | string | 是 | 首帧。公网 HTTPS URL，或本机绝对路径（如 `/root/autodl-tmp/test.jpg`）。JPEG / PNG / WebP / GIF 等均可。配置了 `WAN22_IMAGE_HOSTS` 时 HTTPS host 须在名单内；本地文件不走白名单。不要传 base64 / multipart |
 | prompt | string | 否 | 空或省略则用服务端默认提示词 |
 | negativePrompt | string | 否 | 会传给模型 |
 | duration | number | 否 | 秒，`(0, 15]`，默认 5。可写 5 或 5.0 |
-| resolution | string | 否 | 仅 `540p` / `720p` / `1080p`。本轮只记录，画布仍约 480×832，不会真超分 |
+| resolution | string | 否 | `480p` / `540p` / `720p` / `1080p`。480p/540p 画布约 480×832；720p 约 720×1248；1080p 约 1080×1872 |
 | webhookUrl | string | 否 | 成功、失败都会 POST。必须 https。配置了 `WAN22_WEBHOOK_HOSTS` 时 host 须在名单内（允许内网）；空则不限制 host |
 | steps | integer | 否 | 1–50，不传则用服务端默认 |
 | quality | integer | 否 | 导出质量 1–10 |
@@ -74,8 +74,8 @@ Content-Type: application/json
 | --- | --- |
 | 400 | 图 / webhook URL 不合法：非 https、图解析到私网；配置了白名单时 host 不在名单内 |
 | 422 | 字段类型或范围不对（duration 超 15、resolution 不是那三个枚举等） |
-| 429 | 排队 List ≥ 500（正在跑的不算进这 500） |
-| 503 | Redis 不可用或入队失败 |
+| 429 | 待跑任务 ≥ 500 |
+| 503 | 服务未就绪 |
 
 ---
 
@@ -154,7 +154,6 @@ error 短码（不要当给人看的长文案）：
 | HTTP | 说明 |
 | --- | --- |
 | 404 | 任务不存在 |
-| 503 | 队列不可用 |
 
 ---
 
@@ -206,20 +205,20 @@ Header：
 
 探活
 
-健康检查（API Gateway / Lambda）
+健康检查
 
 请求
 - url: `/health`
 - method: GET
 
 返回
-- HTTP 200：能连上 Redis
-- HTTP 503：Redis 不可用
+- HTTP 200：进程活着
 
 字段说明（200）：
 
 | 字段名 | 类型 | 必须 | 说明 |
 | --- | --- | --- | --- |
 | ok | boolean | 是 | |
+| model_ready | boolean | 是 | 模型是否已加载（DRY_RUN 恒为 true） |
 
-GPU 本机还有 `/health`、`/ready`（模型是否已加载），**不要走 Java 主路径**，只给运维。
+`/ready` 在模型未加载时 503，给运维用。

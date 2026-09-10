@@ -31,7 +31,7 @@ def start() -> None:
 
 
 def run_forever() -> None:
-    """前台跑 worker，进程不退出。start.sh 用这个，不再对外接单。"""
+    """前台只跑 worker 循环。现网用 uvicorn 接单，一般不走这里。"""
     start()
     while True:
         time.sleep(3600)
@@ -70,8 +70,7 @@ def _loop() -> None:
         try:
             task_id = store.pop_task(timeout=5)
         except Exception:
-            logger.exception("queue pop failed")
-            store.reset_client()
+            logger.exception("task pop failed")
             time.sleep(1)
             continue
         if not task_id:
@@ -122,6 +121,7 @@ def _run(task_id: str) -> None:
                 steps=task.get("steps"),
                 negative_prompt=task.get("negative_prompt"),
                 quality=task.get("quality"),
+                resolution=task.get("resolution"),
             )
         except Exception:
             logger.exception("generate failed task=%s", task_id)
@@ -164,27 +164,14 @@ def _run(task_id: str) -> None:
                 return
 
         upload_t = time.monotonic()
-        try:
-            video_url = (
-                f"http://127.0.0.1/dry-run/{task_id}.mp4"
-                if config.DRY_RUN
-                else upload_video(output, object_name=f"{task_id}.mp4")
-            )
-        except Exception:
-            logger.exception("upload failed task=%s", task_id)
-            _log_timing(
-                task,
-                status="failed",
-                error="upload_failed",
-                seed=used_seed,
-                total_s=time.monotonic() - gen_started,
-                generate_s=generate_s,
-                foley_s=foley_s,
-                upload_s=time.monotonic() - upload_t,
-                foley_ok=foley_ok,
-            )
-            _fail_or_retry(task_id, "upload_failed")
-            return
+        if config.DRY_RUN:
+            video_url = f"http://127.0.0.1/dry-run/{task_id}.mp4"
+        else:
+            try:
+                video_url = upload_video(output, object_name=f"{task_id}.mp4")
+            except Exception:
+                logger.exception("upload failed, keep local mp4 task=%s", task_id)
+                video_url = str(Path(output).resolve())
         upload_s = time.monotonic() - upload_t
         total_s = time.monotonic() - gen_started
         wall_s = time.monotonic() - started
@@ -220,7 +207,7 @@ def _run(task_id: str) -> None:
         )
         _fail_or_retry(task_id, "download_failed")
     finally:
-        _remove(first_path, last_path, output)
+        _cleanup_frames(task, first_path, last_path)
         store.clear_running(task_id)
 
 
@@ -233,6 +220,11 @@ def _ensure_image(task: dict, kind: str) -> str:
     url = task.get(url_key)
     if not url:
         raise UrlError("missing image")
+    local = Path(url)
+    if local.is_file():
+        resolved = str(local.resolve())
+        store.update_task(task["id"], **{path_key: resolved})
+        return resolved
     logger.info("re-download task=%s kind=%s url=%s", task["id"], kind, url)
     saved = download.download_image(url, config.UPLOAD_DIR / f"{task['id']}_{kind}")
     store.update_task(task["id"], **{path_key: saved})
@@ -322,3 +314,18 @@ def _remove(*paths: str | None) -> None:
     for path in paths:
         if path:
             Path(path).unlink(missing_ok=True)
+
+
+def _cleanup_frames(task: dict, *paths: str | None) -> None:
+    originals = {
+        str(Path(value).resolve())
+        for value in (task.get("image_url"), task.get("last_image_url"))
+        if value and Path(str(value)).is_file()
+    }
+    for path in paths:
+        if not path:
+            continue
+        resolved = str(Path(path).resolve()) if Path(path).exists() else path
+        if resolved in originals:
+            continue
+        Path(path).unlink(missing_ok=True)

@@ -422,33 +422,52 @@ def _snap_frames(seconds: float) -> int:
     return min(((raw - 1) // 4) * 4 + 1, limit)
 
 
-def _resize_for_wan(image: Image.Image, pipe) -> Image.Image:
+def dims_for_resolution(resolution: str | None) -> tuple[int, int, int]:
+    """返回 (min_dim, max_dim, square_dim)。480p 对齐现网 480×832。"""
+    key = (resolution or "480p").lower()
+    mapping = {
+        "480p": (480, 832, 640),
+        "540p": (480, 832, 640),
+        "720p": (720, 1248, 960),
+        "1080p": (1080, 1872, 1440),
+    }
+    return mapping.get(key, mapping["480p"])
+
+
+def _resize_for_wan(
+    image: Image.Image,
+    pipe,
+    *,
+    min_dim: int,
+    max_dim: int,
+    square_dim: int,
+) -> Image.Image:
     """按参考 Space 的 480×832 / 640×640 规则裁切并缩放首帧。"""
     image = image.convert("RGB")
     width, height = image.size
     if width == height:
-        return image.resize((config.SQUARE_DIM, config.SQUARE_DIM), Image.Resampling.LANCZOS)
+        return image.resize((square_dim, square_dim), Image.Resampling.LANCZOS)
 
     aspect_ratio = width / height
-    max_aspect = config.MAX_DIM / config.MIN_DIM
-    min_aspect = config.MIN_DIM / config.MAX_DIM
+    max_aspect = max_dim / min_dim
+    min_aspect = min_dim / max_dim
     source = image
 
     if aspect_ratio > max_aspect:
-        target_width, target_height = config.MAX_DIM, config.MIN_DIM
+        target_width, target_height = max_dim, min_dim
         crop_width = int(round(height * max_aspect))
         left = (width - crop_width) // 2
         source = image.crop((left, 0, left + crop_width, height))
     elif aspect_ratio < min_aspect:
-        target_width, target_height = config.MIN_DIM, config.MAX_DIM
+        target_width, target_height = min_dim, max_dim
         crop_height = int(round(width / min_aspect))
         top = (height - crop_height) // 2
         source = image.crop((0, top, width, top + crop_height))
     elif width > height:
-        target_width = config.MAX_DIM
+        target_width = max_dim
         target_height = int(round(target_width / aspect_ratio))
     else:
-        target_height = config.MAX_DIM
+        target_height = max_dim
         target_width = int(round(target_height * aspect_ratio))
 
     model_multiple = int(
@@ -457,8 +476,8 @@ def _resize_for_wan(image: Image.Image, pipe) -> Image.Image:
     multiple = max(config.SPATIAL_MULTIPLE, model_multiple)
     final_width = round(target_width / multiple) * multiple
     final_height = round(target_height / multiple) * multiple
-    final_width = max(config.MIN_DIM, min(config.MAX_DIM, final_width))
-    final_height = max(config.MIN_DIM, min(config.MAX_DIM, final_height))
+    final_width = max(min_dim, min(max_dim, final_width))
+    final_height = max(min_dim, min(max_dim, final_height))
     return source.resize((final_width, final_height), Image.Resampling.LANCZOS)
 
 
@@ -487,6 +506,7 @@ def generate_video(
     steps: int | None,
     negative_prompt: str | None = None,
     quality: int | None = None,
+    resolution: str | None = None,
 ) -> int:
     """生成单个 MP4，返回实际使用的 seed。"""
     used_seed = int(seed) if seed is not None else secrets.randbelow(2**31)
@@ -499,7 +519,15 @@ def generate_video(
             raise ValueError("last_frame must be provided with first_frame")
         raise ValueError("WAMU I2V must provide first_frame")
     if config.DRY_RUN:
-        logger.info("dry-run placeholder seed=%s duration=%s", used_seed, duration)
+        min_dim, max_dim, _square = dims_for_resolution(resolution)
+        logger.info(
+            "dry-run placeholder seed=%s duration=%s resolution=%s min=%s max=%s",
+            used_seed,
+            duration,
+            resolution or "480p",
+            min_dim,
+            max_dim,
+        )
         _write_placeholder(output_path)
         return used_seed
 
@@ -508,7 +536,14 @@ def generate_video(
     from wan22.media.image import open_rgb
 
     pipe = load_pipe()
-    image = _resize_for_wan(open_rgb(first_frame_path), pipe)
+    min_dim, max_dim, square_dim = dims_for_resolution(resolution)
+    image = _resize_for_wan(
+        open_rgb(first_frame_path),
+        pipe,
+        min_dim=min_dim,
+        max_dim=max_dim,
+        square_dim=square_dim,
+    )
 
     last_image = None
     if last_frame_path:

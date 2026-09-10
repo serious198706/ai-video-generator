@@ -12,7 +12,7 @@ class GenerateRequest(BaseModel):
     prompt: str | None = None
     negative_prompt: str | None = Field(default=None, alias="negativePrompt")
     duration: float = 5
-    resolution: Literal["540p", "720p", "1080p"] | None = None
+    resolution: Literal["480p", "540p", "720p", "1080p"] | None = None
     webhook_url: str | None = Field(default=None, alias="webhookUrl")
     steps: int | None = Field(default=None, ge=1, le=50)
     quality: int | None = Field(default=None, ge=1, le=10)

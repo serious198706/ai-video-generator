@@ -13,11 +13,6 @@ fi
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/worker-env.sh"
 
-if [[ -z "${WAN22_REDIS_URL:-}" ]]; then
-  echo "[wan22] 请在 .env 里设置 WAN22_REDIS_URL（ElastiCache 用 rediss://）" >&2
-  exit 1
-fi
-
 if [[ -z "${WAN22_FOLEY_ENABLE:-}" ]]; then
   if [[ -x "$WAN22_FOLEY_PYTHON" ]]; then
     WAN22_FOLEY_ENABLE=1
@@ -72,8 +67,7 @@ if [[ "${WAN22_DRY_RUN:-0}" != "1" ]]; then
   python -c "from wan22.infer.generate import preflight; preflight(); print('[wan22] preflight OK')"
 fi
 
-# GPU 只推理：worker LPOP Redis。本机 /health /ready 给运维，不给 Java 接单。
-echo "[wan22] starting GPU worker"
+echo "[wan22] starting GPU API"
 exec uvicorn wan22.api.app:app \
   --host "${WAN22_HOST}" \
   --port "${WAN22_PORT}"

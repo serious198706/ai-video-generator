@@ -1,5 +1,7 @@
 logs/
+logs-test/
 data/
+data-test/
 __pycache__/
 *.pyc
 .venv/

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+from pathlib import Path
 from urllib.parse import urlparse
 
 _METADATA_NETWORKS = (
@@ -26,6 +27,9 @@ class UrlError(ValueError):
     """对外可映射成 400 的 URL 校验失败。"""
 
 
+_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
+
+
 def host_allowed(host: str, allowlist: tuple[str, ...]) -> bool:
     host = host.lower().rstrip(".")
     if not host:
@@ -44,6 +48,20 @@ def host_allowed(host: str, allowlist: tuple[str, ...]) -> bool:
         elif host == entry:
             return True
     return False
+
+
+def assert_image_source(value: str, allowlist: tuple[str, ...], *, kind: str = "image") -> str:
+    """HTTPS 公网图，或本机已存在的绝对路径（无外网时给 AutoDL 用）。"""
+    raw = value.strip()
+    path = Path(raw)
+    if path.is_absolute():
+        resolved = path.resolve()
+        if not resolved.is_file():
+            raise UrlError(f"{kind} local file not found")
+        if resolved.suffix.lower() not in _IMAGE_SUFFIXES:
+            raise UrlError(f"{kind} local file type not allowed")
+        return str(resolved)
+    return assert_https_url(raw, allowlist, kind=kind, allow_private=False)
 
 
 def assert_https_url(

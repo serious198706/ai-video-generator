@@ -82,10 +82,10 @@ echo "[wan22] gpu=$(nvidia-smi --query-gpu=name,driver_version --format=csv,nohe
 mkdir -p /opt /data/models /data/hf-cache
 if [[ ! -f .env ]]; then
   if [[ -f .env.example ]]; then
-    echo "[wan22] 没有 .env，已从 .env.example 复制一份，请改 Redis / S3 后再 start.sh"
+    echo "[wan22] 没有 .env，已从 .env.example 复制一份，请改 hosts / S3 后再 start.sh"
     cp .env.example .env
   else
-    echo "[wan22] 没有 .env，deploy.sh 仍可装依赖，但 start.sh 需要 WAN22_REDIS_URL" >&2
+    echo "[wan22] 没有 .env，deploy.sh 仍可装依赖，start.sh 会 source .env" >&2
   fi
 fi
 

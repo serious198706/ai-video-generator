@@ -65,7 +65,6 @@ S3_PREFIX = os.environ.get("WAN22_S3_PREFIX", "wan22/")
 S3_PUBLIC_BASE_URL = os.environ.get("WAN22_S3_PUBLIC_BASE_URL", "").rstrip("/")
 S3_ENDPOINT = os.environ.get("WAN22_S3_ENDPOINT", "")
 
-REDIS_URL = os.environ.get("WAN22_REDIS_URL", "redis://127.0.0.1:6379/0")
 QUEUE_MAX = int(os.environ.get("WAN22_QUEUE_MAX", "500"))
 MAX_ATTEMPTS = int(os.environ.get("WAN22_MAX_ATTEMPTS", "3"))
 WORKER_ID = os.environ.get("WAN22_WORKER_ID") or socket.gethostname()
