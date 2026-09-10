@@ -13,8 +13,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import sys
+import tempfile
 import traceback
 from pathlib import Path
 
@@ -36,24 +38,48 @@ def _reply(payload: dict) -> None:
     _JSON_OUT.flush()
 
 
+def _link_named_ffmpeg(exe: Path, bindir: Path) -> Path:
+    """imageio-ffmpeg 的二进制不叫 ffmpeg，SeedVR2 却硬编码调用 ffmpeg。"""
+    bindir.mkdir(parents=True, exist_ok=True)
+    link = bindir / "ffmpeg"
+    target = exe.resolve()
+    if not target.is_file():
+        raise FileNotFoundError(f"ffmpeg binary missing: {target}")
+    if link.exists() or link.is_symlink():
+        if link.is_symlink() and link.resolve() == target:
+            return link
+        link.unlink()
+    try:
+        link.symlink_to(target)
+    except OSError:
+        link.write_text(
+            f"#!/bin/sh\nexec {shlex.quote(str(target))} \"$@\"\n",
+            encoding="utf-8",
+        )
+        link.chmod(0o755)
+    return link
+
+
 def _ensure_ffmpeg() -> None:
     """OpenCV mp4v 在 Linux 上经常写出纯绿片，必须用 ffmpeg/libx264。"""
-    if shutil.which("ffmpeg"):
-        _log(f"ffmpeg={shutil.which('ffmpeg')}")
+    found = shutil.which("ffmpeg")
+    if found:
+        _log(f"ffmpeg={found}")
         return
     try:
         import imageio_ffmpeg
 
-        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        exe = Path(imageio_ffmpeg.get_ffmpeg_exe())
     except Exception as exc:
         raise RuntimeError(
             "ffmpeg not found; install ffmpeg or imageio-ffmpeg in the upscale venv"
         ) from exc
-    bindir = str(Path(exe).parent)
-    os.environ["PATH"] = bindir + os.pathsep + os.environ.get("PATH", "")
-    if not shutil.which("ffmpeg"):
-        raise RuntimeError(f"ffmpeg still not on PATH after adding {bindir}: {exe}")
-    _log(f"ffmpeg from imageio-ffmpeg: {exe}")
+    shim = _link_named_ffmpeg(exe, Path(tempfile.gettempdir()) / "wan22-upscale-ffmpeg")
+    os.environ["PATH"] = str(shim.parent) + os.pathsep + os.environ.get("PATH", "")
+    found = shutil.which("ffmpeg")
+    if not found:
+        raise RuntimeError(f"ffmpeg still not on PATH after linking {shim} -> {exe}")
+    _log(f"ffmpeg={found} -> {exe}")
 
 
 def _snap_4n1(value: int) -> int:
@@ -135,6 +161,7 @@ def main() -> int:
     os.environ["PYTHONPATH"] = str(repo) + os.pathsep + os.environ.get("PYTHONPATH", "")
 
     try:
+        _ensure_ffmpeg()
         import inference_cli as cli
         from src.utils.downloads import download_weight
         from src.utils.model_registry import DEFAULT_VAE
@@ -144,7 +171,6 @@ def main() -> int:
             DEFAULT_VAE,
             str(Path(boot.model_dir).resolve()),
         )
-        _ensure_ffmpeg()
     except Exception as exc:
         _log(f"load failed: {exc}")
         traceback.print_exc(file=sys.stderr)
