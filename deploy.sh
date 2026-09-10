@@ -223,7 +223,7 @@ else
   if [[ ! -f "$WAN22_UPSCALE_REPO/inference_cli.py" ]]; then
     echo "[wan22] cloning SeedVR2: $WAN22_UPSCALE_REPO"
     git clone --depth 1 \
-      https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler.git \
+      https://gitee.com/cy198706/ComfyUI-SeedVR2_VideoUpscaler.git \
       "$WAN22_UPSCALE_REPO"
   elif [[ -d "$WAN22_UPSCALE_REPO/.git" ]]; then
     echo "[wan22] updating SeedVR2: $WAN22_UPSCALE_REPO"
