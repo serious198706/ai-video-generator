@@ -2,7 +2,7 @@
 
 给 Java 后端调用的图生视频服务，协议对齐 a2e / Pixverse adapter。
 
-Java 直接打 **GPU FastAPI**（`./start.sh`，默认 `:8000`）。`POST /v1/generate` 在本机收下任务并推理，任务记在进程内存里，不再用 Redis / ElastiCache。推理仍是 WAMU Lightning I2V。480p 画布约 480×832；720p 约 720×1248；`1080p` 先按 720p 生成，再用 SeedVR2 超到约 1080×1872，成片上传到 S3（可用 CloudFront 域名回传 `video_url`）。
+Java 直接打 **GPU FastAPI**（`./start.sh`，默认 `:8000`）。`POST /v1/generate` 在本机收下任务并推理，任务记在进程内存里，不再用 Redis / ElastiCache。推理仍是 WAMU Lightning I2V。480p 画布约 480×832；720p 约 720×1248；`1080p` 先按 720p 生成，再用 compact（realesr-general-x4v3）超到约 1080×1872，成片上传到 S3（可用 CloudFront 域名回传 `video_url`）。
 
 ```
 server/
@@ -83,7 +83,7 @@ cp .env.example .env
 ./start.sh
 ```
 
-AutoDL 权重、venv、日志在 `/root/autodl-tmp/wan22`。系统盘只有 30G。`start.sh` 监听 `0.0.0.0:8000`，长时间跑请用 `screen`。第一次默认跳过 Foley。1080p 需要 SeedVR2：`./deploy.sh` 默认会装（`WAN22_UPSCALE_SKIP=0`）。
+AutoDL 权重、venv、日志在 `/root/autodl-tmp/wan22`。系统盘只有 30G。`start.sh` 监听 `0.0.0.0:8000`，长时间跑请用 `screen`。第一次默认跳过 Foley。1080p 需要 compact 超分：`./deploy.sh` 默认会装（`WAN22_UPSCALE_SKIP=0`）。
 
 干净 Ubuntu 26.04（裸金属，没有 DLAMI）先做系统层，再走上面的 `deploy.sh`：
 
@@ -97,7 +97,7 @@ sudo ./bootstrap-ubuntu.sh --install-driver --skip-deploy
 sudo ./bootstrap-ubuntu.sh
 ```
 
-`deploy.sh` 会装 Wan venv 和 WAMU 权重。AutoDL 继承镜像 `torch 2.12.1+cu130`，不装 cu128；EC2 仍装 cu128。Foley 在 AutoDL 默认跳过（`WAN22_FOLEY_SKIP=1`）；现网检测到 Foley python 后 `start.sh` 默认打开。不要 Foley：`.env` 里 `WAN22_FOLEY_ENABLE=0`。SeedVR2 默认安装；不要 1080p：`WAN22_UPSCALE_SKIP=1` 且 `WAN22_UPSCALE_ENABLE=0`。
+`deploy.sh` 会装 Wan venv 和 WAMU 权重。AutoDL 继承镜像 `torch 2.12.1+cu130`，不装 cu128；EC2 仍装 cu128。Foley 在 AutoDL 默认跳过（`WAN22_FOLEY_SKIP=1`）；现网检测到 Foley python 后 `start.sh` 默认打开。不要 Foley：`.env` 里 `WAN22_FOLEY_ENABLE=0`。compact 超分默认安装；不要 1080p：`WAN22_UPSCALE_SKIP=1` 且 `WAN22_UPSCALE_ENABLE=0`。
 
 本机 dry-run（不需要 GPU / Redis）：
 
@@ -143,7 +143,7 @@ Foley 钉了旧版 transformers，venv 与 Wan 分开。Sidecar 常驻，权重�
 
 ## 1080p
 
-`resolution=1080p` 不会把 Lightning 画布拉到 1080×1872。worker 先按 720p 出无声片，把 Wan 挪到 CPU，SeedVR2-3B FP8 sidecar 按短边 1.5× 超分（竖屏约 1080×1872），再配 Foley、上传。超分失败短码 `upscale_failed`，不退回 720p。没装超分时 POST 1080p 返回 503。第一次 1080p 会加载超分权重，后面复用。
+`resolution=1080p` 不会把 Lightning 画布拉到 1080×1872。worker 先按 720p 出无声片，把 Wan 挪到 CPU，compact sidecar（`realesr-general-x4v3`，4× 后再 Lanczos 到 1.5×，竖屏约 1080×1872）超分，再配 Foley、上传。超分失败短码 `upscale_failed`，不退回 720p。没装超分时 POST 1080p 返回 503。第一次 1080p 会加载超分权重，后面复用。
 
 ## 已知约束
 

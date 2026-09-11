@@ -38,6 +38,38 @@ _python() {
   exit 1
 }
 
+_fetch() {
+  local dest="$1"
+  shift
+  if [[ -f "$dest" ]]; then
+    echo "[wan22] have $(basename "$dest")"
+    return 0
+  fi
+  mkdir -p "$(dirname "$dest")"
+  local url
+  for url in "$@"; do
+    echo "[wan22] download $url"
+    if curl -L --fail --retry 3 --retry-delay 2 -o "$dest.tmp" "$url"; then
+      mv "$dest.tmp" "$dest"
+      return 0
+    fi
+    rm -f "$dest.tmp"
+  done
+  echo "[wan22] failed: $(basename "$dest")" >&2
+  return 1
+}
+
+_upscale_venv() {
+  if [[ ! -f "$WAN22_UPSCALE_VENV_DIR/bin/python" ]]; then
+    echo "[wan22] creating upscale virtual environment: $WAN22_UPSCALE_VENV_DIR"
+    upscale_venv_args=()
+    if [[ "${WAN22_VENV_SYSTEM_SITE}" == "1" ]]; then
+      upscale_venv_args+=(--system-site-packages)
+    fi
+    "$BASE_PY" -m venv "${upscale_venv_args[@]}" "$WAN22_UPSCALE_VENV_DIR"
+  fi
+}
+
 BASE_PY="$(_python)"
 echo "[wan22] layout=$WAN22_LAYOUT python=$BASE_PY"
 echo "[wan22] venv=$WAN22_VENV_DIR"
@@ -68,7 +100,7 @@ if [[ "$WAN22_LAYOUT" == "autodl" ]]; then
   mkdir -p "$HF_HOME" "$PIP_CACHE_DIR" "$TMPDIR" "$XDG_CACHE_HOME"
 fi
 
-for command_name in git; do
+for command_name in git curl; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     echo "[wan22] missing command: $command_name" >&2
     exit 1
@@ -214,49 +246,38 @@ PY
 fi
 
 if [[ "$UPSCALE_SKIP" == "1" ]]; then
-  echo "[wan22] WAN22_UPSCALE_SKIP=1, skip SeedVR2"
+  echo "[wan22] WAN22_UPSCALE_SKIP=1, skip upscale"
 else
-  if [[ -z "${WAN22_UPSCALE_REPO:-}" ]]; then
-    echo "[wan22] WAN22_UPSCALE_REPO is empty" >&2
-    exit 1
+  if [[ "$WAN22_LAYOUT" == "autodl" ]]; then
+    case "$WAN22_UPSCALE_MODEL_DIR" in
+      /root/autodl-tmp/*) ;;
+      *)
+        echo "[wan22] AutoDL 超分权重必须在 /root/autodl-tmp 下: $WAN22_UPSCALE_MODEL_DIR" >&2
+        exit 1
+        ;;
+    esac
   fi
-  if [[ ! -f "$WAN22_UPSCALE_REPO/inference_cli.py" ]]; then
-    echo "[wan22] cloning SeedVR2: $WAN22_UPSCALE_REPO"
-    git clone --depth 1 \
-      https://gitee.com/cy198706/ComfyUI-SeedVR2_VideoUpscaler.git \
-      "$WAN22_UPSCALE_REPO"
-  elif [[ -d "$WAN22_UPSCALE_REPO/.git" ]]; then
-    echo "[wan22] updating SeedVR2: $WAN22_UPSCALE_REPO"
-    git -C "$WAN22_UPSCALE_REPO" pull --ff-only || \
-      echo "[wan22] SeedVR2 repo not fast-forward, keep local clone" >&2
-  else
-    echo "[wan22] SeedVR2 repo already present: $WAN22_UPSCALE_REPO"
-  fi
-
-  if [[ ! -f "$WAN22_UPSCALE_VENV_DIR/bin/python" ]]; then
-    echo "[wan22] creating SeedVR2 virtual environment: $WAN22_UPSCALE_VENV_DIR"
-    upscale_venv_args=()
-    if [[ "${WAN22_VENV_SYSTEM_SITE}" == "1" ]]; then
-      upscale_venv_args+=(--system-site-packages)
-    fi
-    "$BASE_PY" -m venv "${upscale_venv_args[@]}" "$WAN22_UPSCALE_VENV_DIR"
-  fi
-
+  _upscale_venv
   UPSCALE_PY="$WAN22_UPSCALE_PYTHON"
-  echo "[wan22] SeedVR2 pip using $UPSCALE_PY"
+  echo "[wan22] compact pip using $UPSCALE_PY"
   "$UPSCALE_PY" -m pip install --upgrade pip setuptools wheel
   if [[ "${WAN22_INSTALL_TORCH}" == "1" ]]; then
     "$UPSCALE_PY" -m pip install --upgrade torch torchvision \
       --index-url https://download.pytorch.org/whl/cu128
   fi
-  "$UPSCALE_PY" -m pip install --upgrade -r "$WAN22_UPSCALE_REPO/requirements.txt"
-  "$UPSCALE_PY" -m pip install --upgrade 'imageio-ffmpeg>=0.6.0'
+  "$UPSCALE_PY" -m pip install --upgrade \
+    'numpy>=1.26.0' \
+    'opencv-python-headless>=4.10.0' \
+    'pillow>=10.0.0' \
+    'imageio-ffmpeg>=0.6.0' \
+    'spandrel>=0.4.0' \
+    'spandrel_extra_arches>=0.2.0'
   mkdir -p "$WAN22_UPSCALE_MODEL_DIR"
-  echo "[wan22] downloading SeedVR2 3B FP8 + VAE"
-  hf download --token $HF_TOKEN numz/SeedVR2_comfyUI \
-    seedvr2_ema_3b_fp8_e4m3fn.safetensors \
-    ema_vae_fp16.safetensors \
-    --local-dir "$WAN22_UPSCALE_MODEL_DIR"
+  GHFAST="${WAN22_GHFAST:-https://ghfast.top/}"
+  echo "[wan22] downloading compact realesr-general-x4v3"
+  _fetch "$WAN22_UPSCALE_MODEL_DIR/$WAN22_UPSCALE_MODEL" \
+    "${GHFAST}https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth" \
+    "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth"
 fi
 
 echo "[wan22] deployment complete; run: $SCRIPT_DIR/start.sh"

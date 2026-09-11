@@ -100,8 +100,8 @@ def create_generation(body: GenerateRequest):
         and not config.DRY_RUN
         and not config.UPSCALE_ENABLE
     ):
-        logger.warning("reject 1080p: SeedVR2 upscale is disabled")
-        raise HTTPException(503, "1080p requires SeedVR2 upscale")
+        logger.warning("reject 1080p: upscale is disabled")
+        raise HTTPException(503, "1080p requires upscale")
 
     task_id = uuid.uuid4().hex
     prompt = (body.prompt or "").strip() or config.DEFAULT_PROMPT

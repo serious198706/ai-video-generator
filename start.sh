@@ -43,6 +43,10 @@ if [[ "$WAN22_UPSCALE_ENABLE" == "1" && ! -x "$WAN22_UPSCALE_PYTHON" ]]; then
   echo "[wan22] 超分已打开但 $WAN22_UPSCALE_PYTHON 不存在，请先运行 ./deploy.sh" >&2
   exit 1
 fi
+if [[ "$WAN22_UPSCALE_ENABLE" == "1" && ! -f "$WAN22_UPSCALE_MODEL_DIR/$WAN22_UPSCALE_MODEL" ]]; then
+  echo "[wan22] compact 权重不存在: $WAN22_UPSCALE_MODEL_DIR/$WAN22_UPSCALE_MODEL，请先运行 ./deploy.sh" >&2
+  exit 1
+fi
 
 # shellcheck disable=SC1091
 source "$WAN22_VENV_DIR/bin/activate"

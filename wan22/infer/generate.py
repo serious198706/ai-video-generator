@@ -148,8 +148,8 @@ def _validate_config() -> None:
         raise ValueError("WAN22_FOLEY_TIMEOUT must be greater than 0")
     if config.UPSCALE_TIMEOUT < 1:
         raise ValueError("WAN22_UPSCALE_TIMEOUT must be greater than 0")
-    if config.UPSCALE_BATCH < 1:
-        raise ValueError("WAN22_UPSCALE_BATCH must be greater than 0")
+    if config.UPSCALE_ENABLE and config.UPSCALE_SCALE <= 1:
+        raise ValueError("WAN22_UPSCALE_SCALE must be greater than 1")
     if config.NUM_STEPS < 1:
         raise ValueError("WAN22_STEPS must be greater than 0")
     if config.FPS < 1:

@@ -14,7 +14,6 @@ from wan22.log import get_logger
 logger = get_logger(__name__)
 
 _SIDECAR = Path(__file__).resolve().parent / "upscale_sidecar.py"
-_VAE_NAME = "ema_vae_fp16.safetensors"
 _lock = threading.Lock()
 _proc: subprocess.Popen | None = None
 
@@ -23,13 +22,13 @@ class UpscaleError(RuntimeError):
     pass
 
 
-def snap_4n1(value: int) -> int:
-    value = max(1, int(value))
-    return ((value - 1) // 4) * 4 + 1
+def even(value: int) -> int:
+    value = max(2, int(value))
+    return value - (value % 2)
 
 
 def decode_json_line(raw: str) -> dict | None:
-    """协议行必须是 JSON 对象。SeedVR2 的 print 提示直接丢掉。"""
+    """协议行必须是 JSON 对象。sidecar 的非 JSON 输出直接丢掉。"""
     text = (raw or "").strip()
     if not text.startswith("{"):
         return None
@@ -40,47 +39,45 @@ def decode_json_line(raw: str) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
-def target_short_side(width: int, height: int) -> int:
-    """720p 画布 1.5×：竖/横短边 1080，方图 1440。"""
-    return int(round(min(width, height) * 1.5))
+def target_short_side(width: int, height: int, scale: float | None = None) -> int:
+    """720p 画布 1.5x：竖/横短边 1080，方图 1440。"""
+    return int(round(min(width, height) * (scale if scale is not None else config.UPSCALE_SCALE)))
 
 
-def target_max_edge(width: int, height: int) -> int:
-    return int(round(max(width, height) * 1.5))
+def target_max_edge(width: int, height: int, scale: float | None = None) -> int:
+    return int(round(max(width, height) * (scale if scale is not None else config.UPSCALE_SCALE)))
+
+
+def target_size(width: int, height: int, scale: float | None = None) -> tuple[int, int]:
+    factor = scale if scale is not None else config.UPSCALE_SCALE
+    return even(round(width * factor)), even(round(height * factor))
+
+
+def _model_path() -> Path:
+    return config.UPSCALE_MODEL_DIR / config.UPSCALE_MODEL
 
 
 def preflight() -> None:
     if not config.UPSCALE_ENABLE:
         return
+    if config.UPSCALE_SCALE <= 1:
+        raise ValueError("WAN22_UPSCALE_SCALE must be greater than 1")
     if not _SIDECAR.is_file():
         raise FileNotFoundError(f"missing upscale sidecar: {_SIDECAR}")
-    if config.UPSCALE_REPO is None or not (config.UPSCALE_REPO / "inference_cli.py").is_file():
-        raise FileNotFoundError(
-            f"WAN22_UPSCALE_REPO missing inference_cli.py: {config.UPSCALE_REPO}"
-        )
-    if not config.UPSCALE_MODEL_DIR.is_dir():
-        raise FileNotFoundError(
-            f"WAN22_UPSCALE_MODEL_DIR not found: {config.UPSCALE_MODEL_DIR}"
-        )
-    dit = config.UPSCALE_MODEL_DIR / config.UPSCALE_DIT
-    vae = config.UPSCALE_MODEL_DIR / _VAE_NAME
-    if not dit.is_file():
-        raise FileNotFoundError(f"SeedVR2 DiT not found: {dit}")
-    if not vae.is_file():
-        raise FileNotFoundError(f"SeedVR2 VAE not found: {vae}")
     python = _python()
     if config.UPSCALE_PYTHON and not Path(python).is_file():
         raise FileNotFoundError(f"WAN22_UPSCALE_PYTHON not found: {python}")
     if config.UPSCALE_TIMEOUT < 1:
         raise ValueError("WAN22_UPSCALE_TIMEOUT must be greater than 0")
+    model = _model_path()
+    if not model.is_file():
+        raise FileNotFoundError(f"compact weights not found: {model}")
     logger.info(
-        "upscale enabled python=%s dit=%s model=%s repo=%s timeout=%s batch=%s",
+        "upscale enabled python=%s model=%s scale=%s timeout=%s",
         python,
-        config.UPSCALE_DIT,
-        config.UPSCALE_MODEL_DIR,
-        config.UPSCALE_REPO,
+        model,
+        config.UPSCALE_SCALE,
         config.UPSCALE_TIMEOUT,
-        snap_4n1(config.UPSCALE_BATCH),
     )
 
 
@@ -101,10 +98,7 @@ def upscale_video(video_path: str) -> None:
                     "cmd": "generate",
                     "video": str(video),
                     "output": str(tmp),
-                    "batch": snap_4n1(config.UPSCALE_BATCH),
-                    "chunk": max(0, config.UPSCALE_CHUNK),
-                    "dit_model": config.UPSCALE_DIT,
-                    "model_dir": str(config.UPSCALE_MODEL_DIR),
+                    "scale": config.UPSCALE_SCALE,
                 }
             )
         if not tmp.is_file() or tmp.stat().st_size < 64:
@@ -147,22 +141,16 @@ def _ensure() -> None:
     if _proc is not None and _proc.poll() is None:
         return
     _kill()
-    if config.UPSCALE_REPO is None:
-        raise UpscaleError("WAN22_UPSCALE_REPO is empty")
     cmd = [
         _python(),
         str(_SIDECAR),
-        "--repo",
-        str(config.UPSCALE_REPO),
-        "--model-dir",
-        str(config.UPSCALE_MODEL_DIR),
-        "--dit-model",
-        config.UPSCALE_DIT,
+        "--model",
+        str(_model_path()),
+        "--scale",
+        str(config.UPSCALE_SCALE),
     ]
     logger.info("starting upscale sidecar: %s", " ".join(cmd))
     env = os.environ.copy()
-    repo = str(config.UPSCALE_REPO)
-    env["PYTHONPATH"] = repo + os.pathsep + env.get("PYTHONPATH", "")
     env["PYTHONUNBUFFERED"] = "1"
     _proc = subprocess.Popen(
         cmd,
@@ -170,7 +158,7 @@ def _ensure() -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        cwd=repo,
+        cwd=str(_SIDECAR.parent),
         env=env,
     )
     threading.Thread(target=_drain_stderr, args=(_proc,), daemon=True).start()

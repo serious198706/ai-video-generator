@@ -75,7 +75,7 @@ Content-Type: application/json
 | 400 | 图 / webhook URL 不合法：非 https、图解析到私网；配置了白名单时 host 不在名单内 |
 | 422 | 字段类型或范围不对（duration 超 15、resolution 不是那三个枚举等） |
 | 429 | 待跑任务 ≥ 500 |
-| 503 | 服务未就绪；或要了 1080p 但机器没装 SeedVR2 |
+| 503 | 服务未就绪；或要了 1080p 但机器没装超分 |
 
 ---
 
