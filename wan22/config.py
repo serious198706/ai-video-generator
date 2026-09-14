@@ -16,13 +16,13 @@ def _abs(path: Path, base: Path) -> Path:
 
 
 _SERVER_ROOT = Path(__file__).resolve().parent.parent
-if os.environ.get("AWS_LAMBDA_FUNCTION_NAME") and not os.environ.get("WAN22_DATA_DIR"):
-    ROOT = Path("/tmp/wan22")
-else:
-    ROOT = _abs(Path(os.environ.get("WAN22_DATA_DIR", _SERVER_ROOT / "data")), _SERVER_ROOT)
+
+# 运行时数据。部署脚本设 WAN22_DATA_DIR；未设则用 server/data。
+ROOT = _abs(Path(os.environ.get("WAN22_DATA_DIR", _SERVER_ROOT / "data")), _SERVER_ROOT)
 UPLOAD_DIR = ROOT / "uploads"
 OUTPUT_DIR = ROOT / "outputs"
 
+# 权重路径。AutoDL / EC2 由 .env + worker-env.sh 覆盖。
 MODEL_DIR = os.environ.get(
     "WAN22_MODEL_DIR",
     "/data/models/wan22/base/WAMU_v3_WAN2.2_I2V_LIGHTNING",
@@ -45,7 +45,6 @@ OFFLOAD = os.environ.get("WAN22_OFFLOAD", "none").lower()
 QUANT = os.environ.get("WAN22_QUANT", "int8wo").lower()
 TEXT_ENCODER_QUANT = os.environ.get("WAN22_TEXT_ENCODER_QUANT", "int8wo").lower()
 VAE_TILING = os.environ.get("WAN22_VAE_TILING", "1") == "1"
-ATTENTION_BACKEND = os.environ.get("WAN22_ATTENTION_BACKEND", "native").lower()
 
 NUM_STEPS = int(os.environ.get("WAN22_STEPS", "6"))
 GUIDANCE_SCALE = float(os.environ.get("WAN22_GUIDANCE_SCALE", "1.0"))
@@ -56,7 +55,6 @@ MIN_DIM = int(os.environ.get("WAN22_MIN_DIM", "480"))
 SQUARE_DIM = int(os.environ.get("WAN22_SQUARE_DIM", "640"))
 SPATIAL_MULTIPLE = int(os.environ.get("WAN22_SPATIAL_MULTIPLE", "16"))
 MAX_FRAMES = int(os.environ.get("WAN22_MAX_FRAMES", "321"))
-DEFAULT_DURATION = float(os.environ.get("WAN22_DURATION", "5"))
 VIDEO_QUALITY = int(os.environ.get("WAN22_VIDEO_QUALITY", "6"))
 
 S3_BUCKET = os.environ.get("WAN22_S3_BUCKET", "")
@@ -77,12 +75,7 @@ DOWNLOAD_TIMEOUT = int(os.environ.get("WAN22_DOWNLOAD_TIMEOUT", "30"))
 WEBHOOK_TIMEOUT = float(os.environ.get("WAN22_WEBHOOK_TIMEOUT", "5"))
 WEBHOOK_RETRIES = int(os.environ.get("WAN22_WEBHOOK_RETRIES", "3"))
 
-if os.environ.get("WAN22_LOG_DIR"):
-    LOG_DIR = os.environ["WAN22_LOG_DIR"]
-elif os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
-    LOG_DIR = "/tmp/wan22-logs"
-else:
-    LOG_DIR = str(_SERVER_ROOT / "logs")
+LOG_DIR = os.environ.get("WAN22_LOG_DIR", str(_SERVER_ROOT / "logs"))
 LOG_LEVEL = os.environ.get("WAN22_LOG_LEVEL", "INFO").upper()
 LOG_BACKUP_DAYS = int(os.environ.get("WAN22_LOG_BACKUP_DAYS", "30"))
 LOG_CONSOLE = os.environ.get("WAN22_LOG_CONSOLE", "1") == "1"
