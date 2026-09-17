@@ -22,12 +22,12 @@ ROOT = _abs(Path(os.environ.get("WAN22_DATA_DIR", _SERVER_ROOT / "data")), _SERV
 UPLOAD_DIR = ROOT / "uploads"
 OUTPUT_DIR = ROOT / "outputs"
 
-# 权重路径。AutoDL / EC2 由 .env + worker-env.sh 覆盖。
+# 权重路径。未设时落在本仓库 models/。deploy.sh / start.sh 会再覆盖。
 MODEL_DIR = os.environ.get(
     "WAN22_MODEL_DIR",
-    "/data/models/wan22/base/WAMU_v3_WAN2.2_I2V_LIGHTNING",
+    str(_SERVER_ROOT / "models" / "base" / "WAMU_v3_WAN2.2_I2V_LIGHTNING"),
 )
-LORA_DIR = Path(os.environ.get("WAN22_LORA_DIR", "/data/models/wan22/loras"))
+LORA_DIR = Path(os.environ.get("WAN22_LORA_DIR", str(_SERVER_ROOT / "models" / "loras")))
 NSFW_HIGH = os.environ.get(
     "WAN22_NSFW_HIGH",
     str(LORA_DIR / "nsfw" / "NSFW-22-H-e8.safetensors"),
@@ -85,7 +85,7 @@ FOLEY_REQUIRED = os.environ.get("WAN22_FOLEY_REQUIRED", "0") == "1"
 FOLEY_PYTHON = os.environ.get("WAN22_FOLEY_PYTHON", "").strip()
 FOLEY_REPO = Path(os.environ.get("WAN22_FOLEY_REPO", "")).expanduser() if os.environ.get("WAN22_FOLEY_REPO") else None
 FOLEY_MODEL_DIR = Path(
-    os.environ.get("WAN22_FOLEY_MODEL_DIR", "/data/models/hunyuanvideo-foley")
+    os.environ.get("WAN22_FOLEY_MODEL_DIR", str(_SERVER_ROOT / "models" / "hunyuanvideo-foley"))
 ).expanduser()
 FOLEY_SIZE = os.environ.get("WAN22_FOLEY_SIZE", "xl").strip().lower()
 FOLEY_PROMPT = os.environ.get(
@@ -104,7 +104,7 @@ FOLEY_TIMEOUT = int(os.environ.get("WAN22_FOLEY_TIMEOUT", "180"))
 UPSCALE_ENABLE = os.environ.get("WAN22_UPSCALE_ENABLE", "0") == "1"
 UPSCALE_PYTHON = os.environ.get("WAN22_UPSCALE_PYTHON", "").strip()
 UPSCALE_MODEL_DIR = Path(
-    os.environ.get("WAN22_UPSCALE_MODEL_DIR", "/data/models/realesrgan")
+    os.environ.get("WAN22_UPSCALE_MODEL_DIR", str(_SERVER_ROOT / "models" / "realesrgan"))
 ).expanduser()
 UPSCALE_MODEL = os.environ.get(
     "WAN22_UPSCALE_MODEL",

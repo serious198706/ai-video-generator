@@ -74,16 +74,16 @@ Webhook body 与任务查询字段一致：`id`、`task_id`、`status`、`video_
 
 ## 启动
 
-路径由 `worker-env.sh` 按机器决定：有 `/root/autodl-tmp` 走 AutoDL 数据盘和镜像 conda Torch；否则现网 EC2 的 `/opt` + `/data`。
+路径全部落在本目录（`server/`）：venv、权重、日志、缓存都不写死 AutoDL / EC2 / vast.ai。Python 从 PATH 找 `python3` 再找 `python`；镜像里已经有 CUDA torch 时 `deploy.sh` 会复用，不再强制装 cu128。
 
 ```bash
 cp .env.example .env
-# 改 hosts / S3。AutoDL 不要改路径，不要设 WAN22_INSTALL_TORCH=1
+# 改 hosts / S3。国内机器再打开 .env 里的镜像项。
 ./deploy.sh
 ./start.sh
 ```
 
-AutoDL 权重、venv、日志在 `/root/autodl-tmp/wan22`。系统盘只有 30G。`start.sh` 监听 `0.0.0.0:8000`，长时间跑请用 `screen`。第一次默认跳过 Foley。1080p 需要 compact 超分：`./deploy.sh` 默认会装（`WAN22_UPSCALE_SKIP=0`）。
+`start.sh` 监听 `0.0.0.0:8000`，长时间跑请用 `screen`。第一次默认跳过 Foley。1080p 需要 compact 超分：`./deploy.sh` 默认会装（`WAN22_UPSCALE_SKIP=0`）。
 
 干净 Ubuntu 26.04（裸金属，没有 DLAMI）先做系统层，再走上面的 `deploy.sh`：
 
@@ -97,7 +97,7 @@ sudo ./bootstrap-ubuntu.sh --install-driver --skip-deploy
 sudo ./bootstrap-ubuntu.sh
 ```
 
-`deploy.sh` 会装 Wan venv 和 WAMU 权重。AutoDL 继承镜像 `torch 2.12.1+cu130`，不装 cu128；EC2 仍装 cu128。Foley 在 AutoDL 默认跳过（`WAN22_FOLEY_SKIP=1`）；现网检测到 Foley python 后 `start.sh` 默认打开。不要 Foley：`.env` 里 `WAN22_FOLEY_ENABLE=0`。compact 超分默认安装；不要 1080p：`WAN22_UPSCALE_SKIP=1` 且 `WAN22_UPSCALE_ENABLE=0`。
+`deploy.sh` 会在本目录建 Wan venv 并拉 WAMU 权重。探测到现成 CUDA torch 就 `--system-site-packages` 复用；没有再 pip 装 cu128。Foley 默认跳过（`WAN22_FOLEY_SKIP=1`）；`start.sh` 看到 Foley python 才打开配音。不要 Foley：`.env` 里 `WAN22_FOLEY_ENABLE=0`。compact 超分默认安装；不要 1080p：`WAN22_UPSCALE_SKIP=1` 且 `WAN22_UPSCALE_ENABLE=0`。
 
 本机 dry-run（不需要 GPU）：
 

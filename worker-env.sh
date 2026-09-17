@@ -1,74 +1,66 @@
 #!/usr/bin/env bash
-# GPU worker 路径。由 deploy.sh / start.sh 在 source .env 之后再 source。
-# 已在环境里的变量不会被覆盖。
-#
-# AutoDL：系统盘 30G，权重必须在 /root/autodl-tmp；Python/Torch 用镜像 conda。
-# 现网 EC2：/opt venv + /data 权重，pip 装 cu128。
+# 路径全部落在本仓库（server/）。deploy.sh / start.sh 在 source .env 之后再 source。
+# 已在环境里的变量不会被覆盖。不假设 AutoDL / EC2 / vast.ai 的盘符或 conda 路径。
 
-if [[ -z "${WAN22_LAYOUT:-}" ]]; then
-  if [[ -d /root/autodl-tmp ]]; then
-    WAN22_LAYOUT=autodl
-  else
-    WAN22_LAYOUT=ec2
+if [[ -z "${SCRIPT_DIR:-}" ]]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+
+_resolve_python() {
+  local candidate
+  if [[ -n "${WAN22_PYTHON:-}" ]]; then
+    if [[ -x "$WAN22_PYTHON" ]]; then
+      echo "$WAN22_PYTHON"
+      return 0
+    fi
+    if command -v "$WAN22_PYTHON" >/dev/null 2>&1; then
+      command -v "$WAN22_PYTHON"
+      return 0
+    fi
+    echo "[wan22] WAN22_PYTHON=$WAN22_PYTHON 不存在，改从 PATH 找 python3/python" >&2
   fi
-fi
-export WAN22_LAYOUT
+  for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
 
-if [[ "$WAN22_LAYOUT" == "autodl" ]]; then
-  : "${WAN22_DATA_ROOT:=/root/autodl-tmp/wan22}"
-  : "${WAN22_PYTHON:=/root/miniconda3/bin/python}"
-  : "${WAN22_VENV_DIR:=$WAN22_DATA_ROOT/venv}"
-  : "${WAN22_FOLEY_VENV_DIR:=$WAN22_DATA_ROOT/foley-venv}"
-  : "${WAN22_FOLEY_REPO:=$WAN22_DATA_ROOT/HunyuanVideo-Foley}"
-  : "${WAN22_UPSCALE_VENV_DIR:=$WAN22_DATA_ROOT/upscale-venv}"
-  : "${WAN22_GHFAST:=https://ghfast.top/}"
-  : "${HF_HOME:=$WAN22_DATA_ROOT/hf-cache}"
-  : "${HF_HUB_CACHE:=$HF_HOME}"
-  : "${HUGGINGFACE_HUB_CACHE:=$HF_HOME}"
-  : "${XDG_CACHE_HOME:=$WAN22_DATA_ROOT/xdg-cache}"
-  : "${PIP_CACHE_DIR:=$WAN22_DATA_ROOT/pip-cache}"
-  : "${TMPDIR:=$WAN22_DATA_ROOT/tmp}"
-  : "${TMP:=$WAN22_DATA_ROOT/tmp}"
-  : "${TEMP:=$WAN22_DATA_ROOT/tmp}"
-  : "${HF_ENDPOINT:=https://hf-mirror.com}"
-  # git clone / pip git+https。挂了就换：https://ghfast.top/https://github.com/ 或 https://kkgithub.com/
-  : "${WAN22_GITHUB_MIRROR:=https://gitclone.com/github.com/}"
-  : "${PIP_INDEX_URL:=https://pypi.tuna.tsinghua.edu.cn/simple}"
-  : "${PIP_TRUSTED_HOST:=pypi.tuna.tsinghua.edu.cn}"
-  : "${MODEL_ROOT:=$WAN22_DATA_ROOT/models}"
-  : "${WAN22_DATA_DIR:=$WAN22_DATA_ROOT/runtime}"
-  : "${WAN22_LOG_DIR:=$WAN22_DATA_ROOT/logs}"
-  : "${WAN22_INSTALL_TORCH:=0}"
-  : "${WAN22_VENV_SYSTEM_SITE:=1}"
-  : "${WAN22_FOLEY_MODEL_DIR:=$WAN22_DATA_ROOT/models/hunyuanvideo-foley}"
-  : "${WAN22_UPSCALE_MODEL_DIR:=$WAN22_DATA_ROOT/models/realesrgan}"
-  : "${WAN22_HOST:=0.0.0.0}"
-  : "${WAN22_PORT:=8000}"
+if RESOLVED_PY="$(_resolve_python)"; then
+  WAN22_PYTHON="$RESOLVED_PY"
 else
-  : "${WAN22_DATA_ROOT:=/data}"
-  : "${WAN22_PYTHON:=python3}"
-  : "${WAN22_VENV_DIR:=/opt/wan22-venv}"
-  : "${WAN22_FOLEY_VENV_DIR:=/opt/foley-venv}"
-  : "${WAN22_FOLEY_REPO:=/opt/HunyuanVideo-Foley}"
-  : "${WAN22_UPSCALE_VENV_DIR:=/opt/upscale-venv}"
-  : "${HF_HOME:=/data/hf-cache}"
-  : "${MODEL_ROOT:=/data/models/wan22}"
-  : "${WAN22_FOLEY_MODEL_DIR:=/data/models/hunyuanvideo-foley}"
-  : "${WAN22_UPSCALE_MODEL_DIR:=/data/models/realesrgan}"
-  : "${WAN22_GHFAST:=https://ghfast.top/}"
-  : "${WAN22_DATA_DIR:=$SCRIPT_DIR/data}"
-  : "${WAN22_LOG_DIR:=$SCRIPT_DIR/logs}"
-  : "${WAN22_INSTALL_TORCH:=1}"
-  : "${WAN22_VENV_SYSTEM_SITE:=0}"
-  : "${WAN22_HOST:=127.0.0.1}"
-  : "${WAN22_PORT:=8000}"
+  WAN22_PYTHON=""
 fi
+unset RESOLVED_PY
+
+: "${WAN22_DATA_ROOT:=$SCRIPT_DIR}"
+: "${WAN22_VENV_DIR:=$WAN22_DATA_ROOT/.venv}"
+: "${WAN22_FOLEY_VENV_DIR:=$WAN22_DATA_ROOT/.venv-foley}"
+: "${WAN22_FOLEY_REPO:=$WAN22_DATA_ROOT/HunyuanVideo-Foley}"
+: "${WAN22_UPSCALE_VENV_DIR:=$WAN22_DATA_ROOT/.venv-upscale}"
+: "${WAN22_CACHE_DIR:=$WAN22_DATA_ROOT/.cache}"
+: "${HF_HOME:=$WAN22_CACHE_DIR/hf}"
+: "${HF_HUB_CACHE:=$HF_HOME}"
+: "${HUGGINGFACE_HUB_CACHE:=$HF_HOME}"
+: "${XDG_CACHE_HOME:=$WAN22_CACHE_DIR/xdg}"
+: "${PIP_CACHE_DIR:=$WAN22_CACHE_DIR/pip}"
+: "${TMPDIR:=$WAN22_CACHE_DIR/tmp}"
+: "${TMP:=$TMPDIR}"
+: "${TEMP:=$TMPDIR}"
+: "${MODEL_ROOT:=$WAN22_DATA_ROOT/models}"
+: "${WAN22_DATA_DIR:=$WAN22_DATA_ROOT/data}"
+: "${WAN22_LOG_DIR:=$WAN22_DATA_ROOT/logs}"
+: "${WAN22_HOST:=0.0.0.0}"
+: "${WAN22_PORT:=8000}"
 
 : "${WAN22_MODEL_DIR:=$MODEL_ROOT/base/WAMU_v3_WAN2.2_I2V_LIGHTNING}"
 : "${WAN22_LORA_DIR:=$MODEL_ROOT/loras}"
 : "${WAN22_NSFW_HIGH:=$WAN22_LORA_DIR/nsfw/NSFW-22-H-e8.safetensors}"
 : "${WAN22_NSFW_LOW:=$WAN22_LORA_DIR/nsfw/NSFW-22-L-e8.safetensors}"
 : "${WAN22_FOLEY_PYTHON:=$WAN22_FOLEY_VENV_DIR/bin/python}"
+: "${WAN22_FOLEY_MODEL_DIR:=$MODEL_ROOT/hunyuanvideo-foley}"
 : "${WAN22_FOLEY_SIZE:=xl}"
 : "${WAN22_FOLEY_PROMPT:=intimate erotic Foley matching the video, soft sensual ambient music, sultry atmosphere, breathy room tone, no speech, no lyrics}"
 : "${WAN22_FOLEY_NEG_PROMPT:=noisy, harsh, speech, lyrics, shouting}"
@@ -77,6 +69,7 @@ fi
 : "${WAN22_FOLEY_TIMEOUT:=180}"
 : "${WAN22_FOLEY_REQUIRED:=0}"
 : "${WAN22_UPSCALE_PYTHON:=$WAN22_UPSCALE_VENV_DIR/bin/python}"
+: "${WAN22_UPSCALE_MODEL_DIR:=$MODEL_ROOT/realesrgan}"
 : "${WAN22_UPSCALE_MODEL:=realesr-general-x4v3.pth}"
 : "${WAN22_UPSCALE_SCALE:=1.5}"
 : "${WAN22_UPSCALE_TIMEOUT:=300}"
@@ -87,7 +80,7 @@ export WAN22_FOLEY_SIZE WAN22_FOLEY_PROMPT WAN22_FOLEY_NEG_PROMPT
 export WAN22_FOLEY_STEPS WAN22_FOLEY_GUIDANCE WAN22_FOLEY_TIMEOUT WAN22_FOLEY_REQUIRED
 export WAN22_UPSCALE_VENV_DIR WAN22_UPSCALE_PYTHON WAN22_UPSCALE_MODEL_DIR
 export WAN22_UPSCALE_MODEL WAN22_UPSCALE_SCALE WAN22_UPSCALE_TIMEOUT
-export WAN22_GHFAST
+export WAN22_CACHE_DIR WAN22_GHFAST
 export HF_HOME HF_HUB_CACHE HUGGINGFACE_HUB_CACHE HF_ENDPOINT
 export XDG_CACHE_HOME PIP_CACHE_DIR TMPDIR TMP TEMP
 export MODEL_ROOT WAN22_MODEL_DIR WAN22_LORA_DIR WAN22_NSFW_HIGH WAN22_NSFW_LOW

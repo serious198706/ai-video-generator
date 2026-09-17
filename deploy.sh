@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# GPU worker 部署：venv + 权重。AutoDL 不覆盖镜像 Torch；EC2 仍装 cu128。
+# GPU 部署：在本目录建 venv、下权重。不写死 AutoDL / EC2 / vast.ai 路径。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -14,27 +14,17 @@ fi
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/worker-env.sh"
 
-if [[ -z "${WAN22_FOLEY_SKIP:-}" ]]; then
-  if [[ "$WAN22_LAYOUT" == "autodl" ]]; then
-    FOLEY_SKIP=1
-  else
-    FOLEY_SKIP=0
-  fi
-else
-  FOLEY_SKIP="$WAN22_FOLEY_SKIP"
-fi
+FOLEY_SKIP="${WAN22_FOLEY_SKIP:-1}"
 UPSCALE_SKIP="${WAN22_UPSCALE_SKIP:-0}"
 
 _python() {
-  if [[ -x "$WAN22_PYTHON" ]]; then
+  if [[ -n "${WAN22_PYTHON:-}" ]]; then
     echo "$WAN22_PYTHON"
     return
   fi
-  if command -v "$WAN22_PYTHON" >/dev/null 2>&1; then
-    command -v "$WAN22_PYTHON"
-    return
-  fi
-  echo "[wan22] 找不到 Python: $WAN22_PYTHON" >&2
+  echo "[wan22] 找不到 python3 / python。" >&2
+  echo "[wan22] 先装 Python，或在 .env 里设 WAN22_PYTHON=/绝对路径/python" >&2
+  echo "[wan22] PATH=$PATH" >&2
   exit 1
 }
 
@@ -71,34 +61,30 @@ _upscale_venv() {
 }
 
 BASE_PY="$(_python)"
-echo "[wan22] layout=$WAN22_LAYOUT python=$BASE_PY"
-echo "[wan22] venv=$WAN22_VENV_DIR"
+
+if [[ -z "${WAN22_INSTALL_TORCH:-}" ]]; then
+  if "$BASE_PY" -c "import torch; assert torch.cuda.is_available()" >/dev/null 2>&1; then
+    WAN22_INSTALL_TORCH=0
+  else
+    WAN22_INSTALL_TORCH=1
+  fi
+fi
+if [[ -z "${WAN22_VENV_SYSTEM_SITE:-}" ]]; then
+  if [[ "$WAN22_INSTALL_TORCH" == "0" ]]; then
+    WAN22_VENV_SYSTEM_SITE=1
+  else
+    WAN22_VENV_SYSTEM_SITE=0
+  fi
+fi
+export WAN22_INSTALL_TORCH WAN22_VENV_SYSTEM_SITE
+
+echo "[wan22] root=$SCRIPT_DIR python=$BASE_PY"
+echo "[wan22] venv=$WAN22_VENV_DIR system_site=$WAN22_VENV_SYSTEM_SITE install_torch=$WAN22_INSTALL_TORCH"
 echo "[wan22] models=$WAN22_MODEL_DIR"
 echo "[wan22] hf_home=$HF_HOME endpoint=${HF_ENDPOINT:-https://huggingface.co}"
 echo "[wan22] github_mirror=${WAN22_GITHUB_MIRROR:-https://github.com/} pip_index=${PIP_INDEX_URL:-pypi.org}"
 
-if [[ "$WAN22_LAYOUT" == "autodl" ]]; then
-  if [[ ! -d /root/autodl-tmp ]]; then
-    echo "[wan22] WAN22_LAYOUT=autodl 但没有 /root/autodl-tmp" >&2
-    exit 1
-  fi
-  autodl_src="$(df -P /root/autodl-tmp | awk 'NR==2 { print $1 }')"
-  root_src="$(df -P / | awk 'NR==2 { print $1 }')"
-  if [[ -z "$autodl_src" || "$autodl_src" == "$root_src" ]]; then
-    echo "[wan22] /root/autodl-tmp 还在系统盘 overlay 上，下载会把 30G 写满。" >&2
-    echo "[wan22] 打开 AutoDL 控制台给实例加数据盘，确认: df -h /root/autodl-tmp 不是 30G overlay。" >&2
-    df -h / /root/autodl-tmp >&2 || true
-    exit 1
-  fi
-  case "$WAN22_MODEL_DIR" in
-    /root/autodl-tmp/*) ;;
-    *)
-      echo "[wan22] AutoDL 系统盘只有 30G，WAN22_MODEL_DIR 必须在 /root/autodl-tmp 下: $WAN22_MODEL_DIR" >&2
-      exit 1
-      ;;
-  esac
-  mkdir -p "$HF_HOME" "$PIP_CACHE_DIR" "$TMPDIR" "$XDG_CACHE_HOME"
-fi
+mkdir -p "$HF_HOME" "$PIP_CACHE_DIR" "$TMPDIR" "$XDG_CACHE_HOME" "$WAN22_DATA_DIR" "$WAN22_LOG_DIR"
 
 for command_name in git curl; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
@@ -142,12 +128,17 @@ fi
 
 mkdir -p "$WAN22_MODEL_DIR" "$WAN22_LORA_DIR/nsfw" "$HF_HOME" "$WAN22_DATA_DIR" "$WAN22_LOG_DIR"
 
+HF_TOKEN_ARGS=()
+if [[ -n "${HF_TOKEN:-}" ]]; then
+  HF_TOKEN_ARGS=(--token "$HF_TOKEN")
+fi
+
 echo "[wan22] downloading WAMU v3 Lightning base model"
-hf download --token $HF_TOKEN thornmaze/WAMU_v3_WAN2.2_I2V_LIGHTNING \
+hf download "${HF_TOKEN_ARGS[@]}" thornmaze/WAMU_v3_WAN2.2_I2V_LIGHTNING \
   --local-dir "$WAN22_MODEL_DIR"
 
 echo "[wan22] downloading General NSFW Booster"
-hf download --token $HF_TOKEN lopi999/Wan2.2-I2V_General-NSFW-LoRA \
+hf download "${HF_TOKEN_ARGS[@]}" lopi999/Wan2.2-I2V_General-NSFW-LoRA \
   NSFW-22-H-e8.safetensors \
   NSFW-22-L-e8.safetensors \
   --revision aeef17d7fa51 \
@@ -241,22 +232,13 @@ PY
 
   mkdir -p "$WAN22_FOLEY_MODEL_DIR"
   echo "[wan22] downloading HunyuanVideo-Foley weights"
-  hf download --token $HF_TOKEN tencent/HunyuanVideo-Foley \
+  hf download "${HF_TOKEN_ARGS[@]}" tencent/HunyuanVideo-Foley \
     --local-dir "$WAN22_FOLEY_MODEL_DIR"
 fi
 
 if [[ "$UPSCALE_SKIP" == "1" ]]; then
   echo "[wan22] WAN22_UPSCALE_SKIP=1, skip upscale"
 else
-  if [[ "$WAN22_LAYOUT" == "autodl" ]]; then
-    case "$WAN22_UPSCALE_MODEL_DIR" in
-      /root/autodl-tmp/*) ;;
-      *)
-        echo "[wan22] AutoDL 超分权重必须在 /root/autodl-tmp 下: $WAN22_UPSCALE_MODEL_DIR" >&2
-        exit 1
-        ;;
-    esac
-  fi
   _upscale_venv
   UPSCALE_PY="$WAN22_UPSCALE_PYTHON"
   echo "[wan22] compact pip using $UPSCALE_PY"
@@ -273,11 +255,15 @@ else
     'spandrel>=0.4.0' \
     'spandrel_extra_arches>=0.2.0'
   mkdir -p "$WAN22_UPSCALE_MODEL_DIR"
-  GHFAST="${WAN22_GHFAST:-https://ghfast.top/}"
+  UPSCALE_URL="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth"
   echo "[wan22] downloading compact realesr-general-x4v3"
-  _fetch "$WAN22_UPSCALE_MODEL_DIR/$WAN22_UPSCALE_MODEL" \
-    "${GHFAST}https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth" \
-    "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth"
+  if [[ -n "${WAN22_GHFAST:-}" ]]; then
+    _fetch "$WAN22_UPSCALE_MODEL_DIR/$WAN22_UPSCALE_MODEL" \
+      "${WAN22_GHFAST}${UPSCALE_URL}" \
+      "$UPSCALE_URL"
+  else
+    _fetch "$WAN22_UPSCALE_MODEL_DIR/$WAN22_UPSCALE_MODEL" "$UPSCALE_URL"
+  fi
 fi
 
 echo "[wan22] deployment complete; run: $SCRIPT_DIR/start.sh"

@@ -2,10 +2,15 @@ logs/
 logs-test/
 data/
 data-test/
+models/
+.cache/
 __pycache__/
 *.pyc
 .venv/
+.venv-foley/
+.venv-upscale/
 venv/
+HunyuanVideo-Foley/
 .env
 ops/.env
 .DS_Store
