@@ -2,7 +2,7 @@
 
 给 Java 后端调用的图生视频服务，协议对齐 a2e / Pixverse adapter。
 
-Java 直接打 **GPU FastAPI**（`./start.sh`，默认 `:8000`）。`POST /v1/generate` 在本机收下任务并推理，任务记在进程内存里，不再用 Redis / ElastiCache。推理仍是 WAMU Lightning I2V。480p 画布约 480×832；720p 约 720×1248；`1080p` 先按 720p 生成，再用 compact（realesr-general-x4v3）超到约 1080×1872，成片上传到 S3（可用 CloudFront 域名回传 `video_url`）。
+Java 直接打 **GPU FastAPI**（`./start.sh`，默认 `:8000`）。流程只有一条直线：**POST 进来即开始生成 → 成片上传 S3/CloudFront → webhook 回调 Java**。没有队列、没有 Redis，单卡一次只跑一个任务，正在跑时再来的 POST 直接 `429`（由 Java 端决定何时重投）。任务过程落在本机 SQLite 里，只为留档，事后可查。推理仍是 WAMU Lightning I2V。480p 画布约 480×832；720p 约 720×1248；`1080p` 先按 720p 生成，再用 compact（realesr-general-x4v3）超到约 1080×1872。
 
 ```
 server/
@@ -11,7 +11,7 @@ server/
     config.py
     log.py        按日滚动的 wan22.log
     api/          POST /v1/generate、查询任务、/health /ready
-    queue/        本机内存任务 + 串行 worker
+    tasks/        store.py 任务落库（SQLite 留档）+ runner.py 单任务流水线
     infer/        Wan pipeline
     media/        下图、上传、webhook
     net/          URL 白名单 / SSRF
@@ -21,10 +21,10 @@ server/
 
 Java 调用端见 [JAVA.md](JAVA.md)（提交 / 查询 / webhook / 探活）。Base URL 用 GPU 的 `http://<host>:8000`。
 
-`POST /v1/generate`，`application/json`，无鉴权。立刻 `202`（校验 HTTPS/白名单后入本机任务表，后台下图并推理）：
+`POST /v1/generate`，`application/json`，无鉴权。校验 HTTPS/白名单后立刻 `202`，同时后台线程已经在下图并推理（不要同步死等成片）：
 
 ```json
-{ "id": "…", "task_id": "…", "status": "queued" }
+{ "id": "…", "task_id": "…", "status": "running" }
 ```
 
 ```json
@@ -54,11 +54,11 @@ Java 调用端见 [JAVA.md](JAVA.md)（提交 / 查询 / webhook / 探活）。B
 | `steps` / `quality` / `seed` / `lastImage` | 否 | Wan 私有字段；`quality` 为导出 1–10 |
 | `audio` | 否 | 是否配 Foley，默认 `false`。不传或 `null` 都不配音；传 `true` 才跑 Foley |
 
-`GET /v1/tasks/{id}` 读本机任务。`/health` 探活；`/ready` 在模型未加载时 503。`/docs` 默认关闭。
+`GET /v1/tasks/{id}` 读 SQLite 里的任务（接口没变，重启后旧任务照样查得到）。`/health` 探活；`/ready` 在模型未加载时 503。`/docs` 默认关闭。
 
 图片 URL 必须 https 且解析到公网（防 SSRF）。`WAN22_IMAGE_HOSTS` 有值才限制图床域名。Webhook 走 `WAN22_WEBHOOK_HOSTS`，**允许内网 IP**（Java 就在内网），但仍拒绝链路本地 / `169.254.169.254`；该项为空则不限制 host。
 
-Webhook body 与任务查询字段一致：`id`、`task_id`、`status`、`video_url`、`error`、`seed`、`duration`、`resolution`。失败时 `error` 仅为短码：`generate_failed` / `upscale_failed` / `foley_failed` / `upload_failed` / `download_failed` / `interrupted`。配置了 `WAN22_WEBHOOK_SECRET` 时带 `X-Wan-Signature: sha256=…`。
+Webhook body 与任务查询字段一致：`id`、`task_id`、`status`、`video_url`、`error`、`seed`、`duration`、`resolution`。成功和失败都回调一次，失败不重试推理。失败时 `error` 仅为短码：`generate_failed` / `upscale_failed` / `foley_failed` / `upload_failed` / `download_failed` / `interrupted`。配置了 `WAN22_WEBHOOK_SECRET` 时带 `X-Wan-Signature: sha256=…`。
 
 ## 配置
 
@@ -99,7 +99,7 @@ sudo ./bootstrap-ubuntu.sh
 
 `deploy.sh` 会装 Wan venv 和 WAMU 权重。AutoDL 继承镜像 `torch 2.12.1+cu130`，不装 cu128；EC2 仍装 cu128。Foley 在 AutoDL 默认跳过（`WAN22_FOLEY_SKIP=1`）；现网检测到 Foley python 后 `start.sh` 默认打开。不要 Foley：`.env` 里 `WAN22_FOLEY_ENABLE=0`。compact 超分默认安装；不要 1080p：`WAN22_UPSCALE_SKIP=1` 且 `WAN22_UPSCALE_ENABLE=0`。
 
-本机 dry-run（不需要 GPU / Redis）：
+本机 dry-run（不需要 GPU）：
 
 ```bash
 export WAN22_DRY_RUN=1
@@ -127,13 +127,19 @@ curl -sS http://127.0.0.1:8000/v1/tasks/<id>
 - 按日滚动：`logs/wan22.log.YYYY-MM-DD`（本地时区午夜，默认保留 30 天）
 - 同时打到 stdout，方便 journald / 终端
 
-记录接单、拒单（400/429）、推理开始/结束（含 seed、分辨率、耗时）、上传 URL、webhook 成败、进程重启后重试。uvicorn access 也进同一文件。
+记录接单、拒单（400/429/503）、推理开始/结束（含 seed、分辨率、耗时）、上传 URL、webhook 成败、进程重启后判死的任务。uvicorn access 也进同一文件。
 
 GPU 本机异常告警、Mac 上每小时/每日抽日志，见 [ops/README.md](ops/README.md)。
 
 ## 任务
 
-进程内内存：待跑列表 + 任务字典。单卡串行。待跑数量 ≥ `WAN22_QUEUE_MAX`（默认 **500**）返回 429。失败最多重试 3 次（含首次）；`attempts >= 3` 则 `failed` + webhook。进程退出后内存任务清空。
+无队列。进程里只有一个执行位：`POST /v1/generate` 抢到位就建档（状态直接是 `running`）并在后台线程跑「下图 → I2V →（1080p 超分）→（Foley）→ 上传 S3 → webhook」；抢不到就 `429`，要不要重投由 Java 端决定。**失败不重试**，直接落 `failed` + 短码并回调。
+
+任务落在 SQLite（`WAN22_TASK_DB`，默认 `<WAN22_DATA_DIR>/tasks.db`，WAL 模式）里，只做留档：`/v1/tasks/{id}` 从库里读，进程重启后历史任务仍可查。重启时库里残留的 `running` 会被一次性判死为 `failed` / `interrupted` 并补发 webhook，免得 Java 端一直等。想事后翻账直接查库：
+
+```bash
+sqlite3 data/tasks.db "select created_at,status,error,resolution,seed,video_url from tasks order by created_at desc limit 20"
+```
 
 ## 音频（可选）
 

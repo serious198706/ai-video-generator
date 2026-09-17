@@ -1,6 +1,8 @@
 内网图生视频，无鉴权。Base URL 用 **GPU FastAPI**（`./start.sh`，默认 `:8000`）。
 
-可空字段 JSON 里是 `null`（不要用缺 key 判断）。数字不要加引号。`POST /v1/generate` 立刻 `202`，本机后台下图并推理，不要同步死等成片。单卡串行。
+可空字段 JSON 里是 `null`（不要用缺 key 判断）。数字不要加引号。`POST /v1/generate` 立刻 `202`，此时本机已经开始下图并推理，不要同步死等成片。
+
+**没有队列**：单卡一次只跑一个任务。卡上有任务在跑时，新的 POST 直接 `429`，任务不会被记下来，要不要稍后重投由 Java 端自己决定。成片上传 S3 后回调 `webhookUrl`；推理失败不重试，直接回调 `failed` + 短码。
 
 ---
 
@@ -47,7 +49,7 @@ Content-Type: application/json
 ```
 
 返回
-- HTTP 202（此时只是已入队，不是成片完成）
+- HTTP 202（只表示已开始生成，不是成片完成）
 - id 与 task_id 相同，用来轮询
 
 字段说明：
@@ -56,7 +58,7 @@ Content-Type: application/json
 | --- | --- | --- | --- |
 | id | string | 是 | 32 位 hex（无连字符 UUID） |
 | task_id | string | 是 | 与 id 相同 |
-| status | string | 是 | 恒为 `queued` |
+| status | string | 是 | 恒为 `running` |
 
 返回示例：
 
@@ -64,7 +66,7 @@ Content-Type: application/json
 {
   "id": "d4d4c0ea896e4f6ca6425930c41398aa",
   "task_id": "d4d4c0ea896e4f6ca6425930c41398aa",
-  "status": "queued"
+  "status": "running"
 }
 ```
 
@@ -74,7 +76,7 @@ Content-Type: application/json
 | --- | --- |
 | 400 | 图 / webhook URL 不合法：非 https、图解析到私网；配置了白名单时 host 不在名单内 |
 | 422 | 字段类型或范围不对（duration 超 15、resolution 不是那三个枚举等） |
-| 429 | 待跑任务 ≥ 500 |
+| 429 | 卡上已有任务在跑（无队列，未记下这次提交）。稍后重投即可 |
 | 503 | 服务未就绪；或要了 1080p 但机器没装超分 |
 
 ---
@@ -100,7 +102,7 @@ Content-Type: application/json
 | --- | --- | --- | --- |
 | id | string | 是 | 与 task_id 相同 |
 | task_id | string | 是 | |
-| status | string | 是 | `queued` / `running` / `succeeded` / `failed` |
+| status | string | 是 | `running` / `succeeded` / `failed`（没有 `queued`，接单即 running） |
 | prompt | string | 是 | 实际使用的提示词 |
 | duration | number | 是 | 秒，如 5.0 |
 | resolution | string | 否 | `540p` / `720p` / `1080p`，未传为 null |
@@ -115,8 +117,7 @@ status 与成片字段：
 
 | status | 含义 | video_url | error |
 | --- | --- | --- | --- |
-| queued | 排队 | null | null |
-| running | 正在生成 | null | null |
+| running | 正在生成（下图 / 推理 / 超分 / 配音 / 上传） | null | null |
 | succeeded | 成片已上传 | CloudFront mp4 | null |
 | failed | 失败（终态） | null | 短码 |
 
@@ -124,12 +125,12 @@ error 短码（不要当给人看的长文案）：
 
 | 值 | 说明 |
 | --- | --- |
-| generate_failed | 推理失败（含重试仍失败） |
+| generate_failed | 推理失败（不重试） |
 | upscale_failed | 720p 成片后超分到 1080p 失败 |
 | foley_failed | 成片后配 Foley 失败（仅 `WAN22_FOLEY_REQUIRED=1`） |
 | upload_failed | 成片上传 S3 失败 |
 | download_failed | GPU 下图失败 |
-| interrupted | 进程重启后重试仍失败（最多 3 次，含首次） |
+| interrupted | 任务跑到一半服务重启了，重启后判死并补发 webhook |
 
 返回示例：
 
@@ -154,7 +155,7 @@ error 短码（不要当给人看的长文案）：
 
 | HTTP | 说明 |
 | --- | --- |
-| 404 | 任务不存在 |
+| 404 | 任务不存在（任务落了本机 SQLite，服务重启后历史任务仍查得到） |
 
 ---
 

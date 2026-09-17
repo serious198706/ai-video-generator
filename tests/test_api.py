@@ -22,8 +22,10 @@ sys.path.insert(0, str(ROOT))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from wan22 import config  # noqa: E402
 from wan22.api.app import app  # noqa: E402
 from wan22.net.urlguard import UrlError  # noqa: E402
+from wan22.tasks import runner, store  # noqa: E402
 
 
 def _fake_https(url, _allowlist, *, kind, allow_private=False):
@@ -37,6 +39,18 @@ def _fake_download(url, dest: Path) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"fake-image")
     return str(path)
+
+
+def _poll(client, task_id: str, tries: int = 100) -> dict:
+    task = None
+    for _ in range(tries):
+        polled = client.get(f"/v1/tasks/{task_id}")
+        assert polled.status_code == 200, polled.text
+        task = polled.json()
+        if task["status"] in {"succeeded", "failed"}:
+            return task
+        time.sleep(0.05)
+    raise AssertionError(f"task {task_id} never finished: {task}")
 
 
 class GenerateApiTests(unittest.TestCase):
@@ -57,23 +71,90 @@ class GenerateApiTests(unittest.TestCase):
             )
             self.assertEqual(created.status_code, 202, created.text)
             body = created.json()
-            self.assertEqual(body["status"], "queued")
+            self.assertEqual(body["status"], "running")
             self.assertEqual(body["id"], body["task_id"])
             self.assertTrue(body["id"])
 
-            task = None
-            for _ in range(50):
-                polled = client.get(f"/v1/tasks/{body['id']}")
-                self.assertEqual(polled.status_code, 200, polled.text)
-                task = polled.json()
-                if task["status"] in {"succeeded", "failed"}:
-                    break
-                time.sleep(0.05)
-
-            self.assertIsNotNone(task)
+            task = _poll(client, body["id"])
             self.assertEqual(task["status"], "succeeded")
             self.assertTrue(task["video_url"])
             self.assertEqual(task["prompt"], "turn her head")
+
+            # SQLite 留档：进程里查不到内存态也能从库里读回来
+            stored = store.get_task(body["id"])
+            self.assertIsNotNone(stored)
+            self.assertEqual(stored["status"], "succeeded")
+            self.assertEqual(stored["worker_id"], config.WORKER_ID)
+
+    def test_post_generate_returns_429_while_busy(self):
+        with (
+            patch("wan22.api.app.assert_image_source", side_effect=_fake_https),
+            patch("wan22.media.download.download_image", side_effect=_fake_download),
+            TestClient(app) as client,
+        ):
+            payload = {
+                "image": "https://cdn.example.com/a.jpg",
+                "prompt": "busy check",
+                "duration": 5,
+                "audio": False,
+            }
+            # 执行位被占住（相当于卡上正在跑），此时不排队，直接 429
+            self.assertTrue(runner.reserve("busy-slot"))
+            try:
+                busy = client.post("/v1/generate", json=payload)
+                self.assertEqual(busy.status_code, 429, busy.text)
+            finally:
+                runner.release("busy-slot")
+            self.assertIsNone(runner.current())
+
+            created = client.post("/v1/generate", json=payload)
+            self.assertEqual(created.status_code, 202, created.text)
+            task = _poll(client, created.json()["id"])
+            self.assertEqual(task["status"], "succeeded")
+
+    def test_second_post_during_generate_returns_429(self):
+        def _slow_generate(**kwargs):
+            time.sleep(0.5)
+            return 123
+
+        with (
+            patch("wan22.api.app.assert_image_source", side_effect=_fake_https),
+            patch("wan22.media.download.download_image", side_effect=_fake_download),
+            patch("wan22.tasks.runner.generate.generate_video", side_effect=_slow_generate),
+            TestClient(app) as client,
+        ):
+            payload = {
+                "image": "https://cdn.example.com/a.jpg",
+                "prompt": "slow generate",
+                "duration": 5,
+                "audio": False,
+            }
+            first = client.post("/v1/generate", json=payload)
+            self.assertEqual(first.status_code, 202, first.text)
+            second = client.post("/v1/generate", json=payload)
+            self.assertEqual(second.status_code, 429, second.text)
+
+            task = _poll(client, first.json()["id"])
+            self.assertEqual(task["status"], "succeeded")
+            self.assertEqual(task["seed"], 123)
+
+    def test_interrupted_running_task_fails_on_restart(self):
+        task_id = "interruptedtask0000000000000000ff"
+        store.create_task(
+            task_id,
+            {
+                "prompt": "left running",
+                "image_url": "https://cdn.example.com/a.jpg",
+                "duration": 5,
+                "audio": False,
+            },
+        )
+        with TestClient(app) as client:
+            polled = client.get(f"/v1/tasks/{task_id}")
+            self.assertEqual(polled.status_code, 200, polled.text)
+            body = polled.json()
+            self.assertEqual(body["status"], "failed")
+            self.assertEqual(body["error"], "interrupted")
 
     def test_post_generate_accepts_local_image_and_480p(self):
         from PIL import Image
@@ -94,16 +175,7 @@ class GenerateApiTests(unittest.TestCase):
                     },
                 )
                 self.assertEqual(created.status_code, 202, created.text)
-                body = created.json()
-                task = None
-                for _ in range(50):
-                    polled = client.get(f"/v1/tasks/{body['id']}")
-                    self.assertEqual(polled.status_code, 200, polled.text)
-                    task = polled.json()
-                    if task["status"] in {"succeeded", "failed"}:
-                        break
-                    time.sleep(0.05)
-                self.assertIsNotNone(task)
+                task = _poll(client, created.json()["id"])
                 self.assertEqual(task["status"], "succeeded")
                 self.assertEqual(task["resolution"], "480p")
 
@@ -126,16 +198,7 @@ class GenerateApiTests(unittest.TestCase):
                     },
                 )
                 self.assertEqual(created.status_code, 202, created.text)
-                body = created.json()
-                task = None
-                for _ in range(50):
-                    polled = client.get(f"/v1/tasks/{body['id']}")
-                    self.assertEqual(polled.status_code, 200, polled.text)
-                    task = polled.json()
-                    if task["status"] in {"succeeded", "failed"}:
-                        break
-                    time.sleep(0.05)
-                self.assertIsNotNone(task)
+                task = _poll(client, created.json()["id"])
                 self.assertEqual(task["status"], "succeeded")
                 self.assertEqual(task["resolution"], "1080p")
 
@@ -159,13 +222,13 @@ class GenerateApiTests(unittest.TestCase):
             )
             self.assertEqual(created.status_code, 503, created.text)
 
-    def test_health_does_not_require_redis(self):
+    def test_health_stays_dependency_free(self):
         with TestClient(app) as client:
             health = client.get("/health")
             self.assertEqual(health.status_code, 200, health.text)
             body = health.json()
             self.assertTrue(body["ok"])
-            self.assertNotIn("redis", body)
+            self.assertIn("model_ready", body)
 
 
 if __name__ == "__main__":

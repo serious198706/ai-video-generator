@@ -63,8 +63,8 @@ S3_PREFIX = os.environ.get("WAN22_S3_PREFIX", "wan22/")
 S3_PUBLIC_BASE_URL = os.environ.get("WAN22_S3_PUBLIC_BASE_URL", "").rstrip("/")
 S3_ENDPOINT = os.environ.get("WAN22_S3_ENDPOINT", "")
 
-QUEUE_MAX = int(os.environ.get("WAN22_QUEUE_MAX", "500"))
-MAX_ATTEMPTS = int(os.environ.get("WAN22_MAX_ATTEMPTS", "3"))
+# 任务留档。没有队列，SQLite 只记录跑过什么、结果是什么，方便后期查。
+TASK_DB = _abs(Path(os.environ.get("WAN22_TASK_DB", ROOT / "tasks.db")), ROOT)
 WORKER_ID = os.environ.get("WAN22_WORKER_ID") or socket.gethostname()
 UPLOAD_MAX_BYTES = int(os.environ.get("WAN22_UPLOAD_MAX_BYTES", str(10 * 1024 * 1024)))
 ENABLE_DOCS = os.environ.get("WAN22_DOCS", "0") == "1"

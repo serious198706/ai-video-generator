@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 from wan22 import config
 from wan22.infer import generate
@@ -12,97 +13,109 @@ from wan22.log import get_logger
 from wan22.media import download, webhook
 from wan22.media.upload import upload_video
 from wan22.net.urlguard import UrlError
-from wan22.queue import store
+from wan22.tasks import store
 
 logger = get_logger(__name__)
 
-_started = False
-_lock = threading.Lock()
+# 单卡只有一个执行位：接单即开跑，跑不动就让接口回 429，不排队、不重试。
+_slot = threading.Lock()
+_current: str | None = None
 
 
-def start() -> None:
-    global _started
-    with _lock:
-        if _started:
-            return
-        _recover_interrupted()
-        thread = threading.Thread(target=_loop, name="wan22-worker", daemon=True)
-        thread.start()
-        _started = True
+def current() -> str | None:
+    with _slot:
+        return _current
 
 
-def run_forever() -> None:
-    """前台只跑 worker 循环。现网用 uvicorn 接单，一般不走这里。"""
-    start()
-    while True:
-        time.sleep(3600)
+def reserve(task_id: str) -> bool:
+    global _current
+    with _slot:
+        if _current is not None:
+            return False
+        _current = task_id
+        return True
 
 
-def _recover_interrupted() -> None:
-    task_id = store.take_interrupted()
-    if not task_id:
-        return
-    task = store.get_task(task_id)
-    if not task or task.get("status") != "running":
-        logger.info(
-            "cleared stale running key task=%s status=%s",
-            task_id,
-            (task or {}).get("status"),
-        )
-        return
-    if task.get("worker_id") and task.get("worker_id") != config.WORKER_ID:
-        logger.info(
-            "skip foreign running task=%s worker=%s",
-            task_id,
-            task.get("worker_id"),
-        )
-        return
-    logger.warning("requeue interrupted running task=%s", task_id)
-    _fail_or_retry(task_id, "interrupted")
+def release(task_id: str) -> None:
+    global _current
+    with _slot:
+        if _current == task_id:
+            _current = None
 
 
-def _loop() -> None:
+def spawn(task_id: str) -> None:
+    """占位成功后调用。HTTP 已经 202 返回，推理在后台线程里跑。"""
+    thread = threading.Thread(
+        target=_run_guarded,
+        args=(task_id,),
+        name=f"wan22-task-{task_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
+
+
+def startup() -> None:
+    stale = store.fail_running("interrupted")
+    for task in stale:
+        logger.warning("fail interrupted task=%s process restarted", task["id"])
+    if stale:
+        threading.Thread(
+            target=_notify_all,
+            args=(stale,),
+            name="wan22-interrupted",
+            daemon=True,
+        ).start()
     if config.PRELOAD and not config.DRY_RUN:
-        try:
-            generate.load_pipe()
-        except Exception:
-            logger.exception("pipeline preload failed")
-    while True:
-        try:
-            task_id = store.pop_task(timeout=5)
-        except Exception:
-            logger.exception("task pop failed")
-            time.sleep(1)
-            continue
-        if not task_id:
-            continue
-        try:
-            _run(task_id)
-        except Exception:
-            logger.exception("worker crashed task=%s", task_id)
-            _fail_or_retry(task_id, "generate_failed")
-            store.clear_running(task_id)
+        threading.Thread(target=_preload, name="wan22-preload", daemon=True).start()
 
 
-def _run(task_id: str) -> None:
+def _preload() -> None:
+    try:
+        generate.load_pipe()
+    except Exception:
+        logger.exception("pipeline preload failed")
+
+
+def _notify_all(tasks: list[dict[str, Any]]) -> None:
+    for task in tasks:
+        try:
+            webhook.notify(task)
+        except Exception:
+            logger.exception("webhook failed task=%s", task.get("id"))
+
+
+def _run_guarded(task_id: str) -> None:
+    outcome: dict[str, Any] | None = None
+    try:
+        outcome = _run(task_id)
+    except Exception:
+        logger.exception("task crashed task=%s", task_id)
+        outcome = {"status": "failed", "error": "generate_failed"}
+    finally:
+        # 显存搬回来、临时帧删完才放开执行位，否则下一单会撞上收尾中的卡。
+        release(task_id)
+    if outcome:
+        _finish(task_id, outcome)
+
+
+def _run(task_id: str) -> dict[str, Any] | None:
+    """跑完一条流水线，返回终态。落库和 webhook 由调用方在释放执行位后做。"""
     task = store.get_task(task_id)
     if not task:
-        logger.warning("missing task=%s after pop", task_id)
-        return
+        logger.warning("missing task=%s", task_id)
+        return None
 
     output = str(config.OUTPUT_DIR / f"{task_id}.mp4")
     first_path = task.get("first_frame_path")
     last_path = task.get("last_frame_path")
     started = time.monotonic()
-    store.set_running(task_id)
     logger.info(
-        "running task=%s duration=%s resolution=%s steps=%s audio=%s attempt=%s",
+        "running task=%s duration=%s resolution=%s steps=%s audio=%s",
         task_id,
         task.get("duration"),
         task.get("resolution"),
         task.get("steps"),
         bool(task.get("audio")),
-        int(task.get("attempts") or 0) + 1,
     )
     try:
         first_path = _ensure_image(task, "first")
@@ -135,8 +148,7 @@ def _run(task_id: str) -> None:
                 total_s=time.monotonic() - gen_started,
                 generate_s=time.monotonic() - gen_started,
             )
-            _fail_or_retry(task_id, "generate_failed")
-            return
+            return {"status": "failed", "error": "generate_failed"}
         generate_s = time.monotonic() - gen_started
 
         needs_upscale = (task.get("resolution") or "").lower() == "1080p" and not config.DRY_RUN
@@ -162,8 +174,7 @@ def _run(task_id: str) -> None:
                             upscale_s=upscale_s,
                             upscale_ok=0,
                         )
-                        _fail_or_retry(task_id, "upscale_failed")
-                        return
+                        return {"status": "failed", "error": "upscale_failed"}
                     upscale_s = time.monotonic() - upscale_t
                 if needs_foley:
                     foley_failed = False
@@ -188,8 +199,7 @@ def _run(task_id: str) -> None:
                             foley_s=foley_s,
                             foley_ok=0,
                         )
-                        _fail_or_retry(task_id, "foley_failed")
-                        return
+                        return {"status": "failed", "error": "foley_failed"}
             finally:
                 generate.resume_gpu()
 
@@ -200,8 +210,22 @@ def _run(task_id: str) -> None:
             try:
                 video_url = upload_video(output, object_name=f"{task_id}.mp4")
             except Exception:
-                logger.exception("upload failed, keep local mp4 task=%s", task_id)
-                video_url = str(Path(output).resolve())
+                logger.exception("upload failed task=%s local=%s", task_id, output)
+                upload_s = time.monotonic() - upload_t
+                _log_timing(
+                    task,
+                    status="failed",
+                    error="upload_failed",
+                    seed=used_seed,
+                    total_s=time.monotonic() - gen_started,
+                    generate_s=generate_s,
+                    upscale_s=upscale_s,
+                    upscale_ok=upscale_ok,
+                    foley_s=foley_s,
+                    foley_ok=foley_ok,
+                    upload_s=upload_s,
+                )
+                return {"status": "failed", "error": "upload_failed"}
         upload_s = time.monotonic() - upload_t
         total_s = time.monotonic() - gen_started
         wall_s = time.monotonic() - started
@@ -225,11 +249,7 @@ def _run(task_id: str) -> None:
             wall_s,
             video_url,
         )
-        _succeed(
-            task_id,
-            seed=used_seed,
-            video_url=video_url,
-        )
+        return {"status": "succeeded", "seed": used_seed, "video_url": video_url}
     except UrlError:
         logger.exception(
             "download failed task=%s image=%s last=%s",
@@ -237,10 +257,16 @@ def _run(task_id: str) -> None:
             task.get("image_url"),
             task.get("last_image_url"),
         )
-        _fail_or_retry(task_id, "download_failed")
+        _log_timing(
+            task,
+            status="failed",
+            error="download_failed",
+            seed=task.get("seed"),
+            total_s=time.monotonic() - started,
+        )
+        return {"status": "failed", "error": "download_failed"}
     finally:
         _cleanup_frames(task, first_path, last_path)
-        store.clear_running(task_id)
 
 
 def _ensure_image(task: dict, kind: str) -> str:
@@ -257,7 +283,7 @@ def _ensure_image(task: dict, kind: str) -> str:
         resolved = str(local.resolve())
         store.update_task(task["id"], **{path_key: resolved})
         return resolved
-    logger.info("re-download task=%s kind=%s url=%s", task["id"], kind, url)
+    logger.info("download task=%s kind=%s url=%s", task["id"], kind, url)
     saved = download.download_image(url, config.UPLOAD_DIR / f"{task['id']}_{kind}")
     store.update_task(task["id"], **{path_key: saved})
     return saved
@@ -313,44 +339,23 @@ def _log_timing(
     logger.info("timing %s", " ".join(fields))
 
 
-def _succeed(task_id: str, **fields) -> None:
-    store.update_task(task_id, status="succeeded", error=None, **fields)
+def _finish(task_id: str, outcome: dict[str, Any]) -> None:
+    """落终态再回调 Java。失败不重投，短码直接给出去。"""
+    if outcome["status"] == "succeeded":
+        store.update_task(
+            task_id,
+            status="succeeded",
+            error=None,
+            seed=outcome.get("seed"),
+            video_url=outcome.get("video_url"),
+        )
+    else:
+        error = outcome.get("error") or "generate_failed"
+        store.update_task(task_id, status="failed", error=error, video_url=None)
+        logger.warning("failed task=%s error=%s", task_id, error)
     task = store.get_task(task_id)
     if task:
         webhook.notify(task)
-
-
-def _fail_or_retry(task_id: str, error: str) -> None:
-    task = store.get_task(task_id)
-    if not task:
-        return
-    attempts = int(task.get("attempts") or 0) + 1
-    if attempts >= config.MAX_ATTEMPTS:
-        store.update_task(task_id, status="failed", error=error, attempts=attempts, worker_id=None)
-        updated = store.get_task(task_id)
-        if updated:
-            webhook.notify(updated)
-        logger.warning(
-            "failed task=%s error=%s attempts=%s",
-            task_id,
-            error,
-            attempts,
-        )
-        return
-    store.requeue(task_id, attempts=attempts, error=None)
-    logger.warning(
-        "requeue task=%s error=%s attempts=%s/%s",
-        task_id,
-        error,
-        attempts,
-        config.MAX_ATTEMPTS,
-    )
-
-
-def _remove(*paths: str | None) -> None:
-    for path in paths:
-        if path:
-            Path(path).unlink(missing_ok=True)
 
 
 def _cleanup_frames(task: dict, *paths: str | None) -> None:

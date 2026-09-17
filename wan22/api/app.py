@@ -12,7 +12,7 @@ from wan22.infer import generate
 from wan22.log import get_logger, setup_logging
 from wan22.media.upload import assert_configured as assert_s3
 from wan22.net.urlguard import UrlError, assert_https_url, assert_image_source
-from wan22.queue import store, worker
+from wan22.tasks import runner, store
 
 logger = get_logger(__name__)
 
@@ -21,7 +21,8 @@ logger = get_logger(__name__)
 async def lifespan(_app: FastAPI):
     setup_logging(force=True)
     logger.info("gpu api starting dry_run=%s docs=%s", config.DRY_RUN, config.ENABLE_DOCS)
-    logger.info("in-memory tasks max=%s attempts=%s", config.QUEUE_MAX, config.MAX_ATTEMPTS)
+    store.ping()
+    logger.info("task db=%s", config.TASK_DB)
     if not config.DRY_RUN:
         assert_s3()
         logger.info(
@@ -30,8 +31,7 @@ async def lifespan(_app: FastAPI):
             config.S3_REGION or "-",
             config.S3_PREFIX,
         )
-    worker.start()
-    logger.info("worker started")
+    runner.startup()
     yield
     logger.info("service stopping")
     from wan22.infer.upscale import stop as stop_upscale
@@ -43,7 +43,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="Wan 2.2 I2V",
-    version="0.3.0",
+    version="0.4.0",
     docs_url="/docs" if config.ENABLE_DOCS else None,
     redoc_url="/redoc" if config.ENABLE_DOCS else None,
     openapi_url="/openapi.json" if config.ENABLE_DOCS else None,
@@ -70,11 +70,6 @@ def _public_task(task: dict) -> dict:
 
 @app.post("/v1/generate")
 def create_generation(body: GenerateRequest):
-    pending = store.pending()
-    if pending >= config.QUEUE_MAX:
-        logger.warning("busy pending=%s max=%s", pending, config.QUEUE_MAX)
-        raise HTTPException(429, "busy")
-
     if body.webhook_url:
         try:
             assert_https_url(
@@ -104,38 +99,49 @@ def create_generation(body: GenerateRequest):
         raise HTTPException(503, "1080p requires upscale")
 
     task_id = uuid.uuid4().hex
+    # 单卡一次只跑一个，没有队列：占不到执行位就让 Java 端稍后重投。
+    if not runner.reserve(task_id):
+        logger.warning("busy running=%s reject task=%s", runner.current(), task_id)
+        raise HTTPException(429, "busy")
+
     prompt = (body.prompt or "").strip() or config.DEFAULT_PROMPT
     negative = (body.negative_prompt or "").strip() or config.NEGATIVE_PROMPT
-    store.create_task(
-        task_id,
-        {
-            "prompt": prompt,
-            "negative_prompt": negative,
-            "image_url": body.image,
-            "last_image_url": body.last_image,
-            "first_frame_path": None,
-            "last_frame_path": None,
-            "duration": body.duration,
-            "resolution": body.resolution,
-            "webhook_url": body.webhook_url,
-            "seed": body.seed,
-            "steps": body.steps,
-            "quality": body.quality,
-            "audio": bool(body.audio),
-        },
-    )
+    try:
+        store.create_task(
+            task_id,
+            {
+                "prompt": prompt,
+                "negative_prompt": negative,
+                "image_url": body.image,
+                "last_image_url": body.last_image,
+                "first_frame_path": None,
+                "last_frame_path": None,
+                "duration": body.duration,
+                "resolution": body.resolution,
+                "webhook_url": body.webhook_url,
+                "seed": body.seed,
+                "steps": body.steps,
+                "quality": body.quality,
+                "audio": bool(body.audio),
+            },
+        )
+        runner.spawn(task_id)
+    except Exception as exc:
+        runner.release(task_id)
+        logger.exception("failed to start task=%s", task_id)
+        raise HTTPException(500, "failed to start task") from exc
+
     logger.info(
-        "accepted task=%s duration=%s resolution=%s steps=%s quality=%s audio=%s pending=%s webhook=%s",
+        "accepted task=%s duration=%s resolution=%s steps=%s quality=%s audio=%s webhook=%s",
         task_id,
         body.duration,
         body.resolution,
         body.steps,
         body.quality,
         bool(body.audio),
-        pending + 1,
         bool(body.webhook_url),
     )
-    return JSONResponse({"id": task_id, "task_id": task_id, "status": "queued"}, status_code=202)
+    return JSONResponse({"id": task_id, "task_id": task_id, "status": "running"}, status_code=202)
 
 
 @app.get("/v1/tasks/{task_id}")

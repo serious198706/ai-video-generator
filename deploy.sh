@@ -159,7 +159,7 @@ else
   if [[ ! -d "$WAN22_FOLEY_REPO/.git" && ! -d "$WAN22_FOLEY_REPO/hunyuanvideo_foley" ]]; then
     echo "[wan22] cloning HunyuanVideo-Foley: $WAN22_FOLEY_REPO"
     git clone --depth 1 \
-      https://gitee.com/cy198706/HunyuanVideo-Foley.git \
+      https://github.com/Tencent-Hunyuan/HunyuanVideo-Foley.git \
       "$WAN22_FOLEY_REPO"
   elif [[ -d "$WAN22_FOLEY_REPO/.git" ]]; then
     echo "[wan22] updating HunyuanVideo-Foley: $WAN22_FOLEY_REPO"
