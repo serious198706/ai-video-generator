@@ -32,8 +32,12 @@ async def lifespan(_app: FastAPI):
             config.S3_PREFIX,
         )
     runner.startup()
+    from wan22.tasks import sqs_consumer
+
+    sqs_consumer.start()
     yield
     logger.info("service stopping")
+    sqs_consumer.stop()
     from wan22.infer.upscale import stop as stop_upscale
     from wan22.infer.foley import stop as stop_foley
 

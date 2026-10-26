@@ -63,6 +63,20 @@ S3_PREFIX = os.environ.get("WAN22_S3_PREFIX", "wan22/")
 S3_PUBLIC_BASE_URL = os.environ.get("WAN22_S3_PUBLIC_BASE_URL", "").rstrip("/")
 S3_ENDPOINT = os.environ.get("WAN22_S3_ENDPOINT", "")
 
+# SQS 接单（可选）。空则只收 HTTP POST。凭证与 S3 共用 AWS_* 环境变量。
+SQS_QUEUE_URL = os.environ.get("SQS_QUEUE_URL", "").strip()
+SQS_REGION = os.environ.get(
+    "SQS_REGION", os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", ""))
+)
+SQS_WAIT_SECONDS = int(os.environ.get("SQS_WAIT_SECONDS", "20"))
+# 生成可能十几分钟：visibility 要大于单次心跳间隔，由看门线程持续续期。
+SQS_VISIBILITY_TIMEOUT = int(os.environ.get("SQS_VISIBILITY_TIMEOUT", "600"))
+SQS_HEARTBEAT_SECONDS = int(os.environ.get("SQS_HEARTBEAT_SECONDS", "120"))
+# 坏消息投递到此次数后建档判死（回调一次）并删除，不再无限重投；队列本身的 DLQ 仍可叠加。
+SQS_MAX_RECEIVE = int(os.environ.get("SQS_MAX_RECEIVE", "5"))
+# 执行位被 HTTP POST 占住时消息退回队列的冷却秒数。
+SQS_BUSY_BACKOFF = int(os.environ.get("SQS_BUSY_BACKOFF", "30"))
+
 # 任务留档。没有队列，SQLite 只记录跑过什么、结果是什么，方便后期查。
 TASK_DB = _abs(Path(os.environ.get("WAN22_TASK_DB", ROOT / "tasks.db")), ROOT)
 WORKER_ID = os.environ.get("WAN22_WORKER_ID") or socket.gethostname()

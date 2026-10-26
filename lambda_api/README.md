@@ -1,6 +1,6 @@
 # Lambda SQS 接单层
 
-API Gateway 调用此 Lambda；Lambda 校验与 GPU API 相同的生成请求后，将任务发到 SQS。Vast.ai worker 主动消费 SQS，因此不需要 Vast.ai GPU 配置 AWS 凭证或暴露随机 URL。
+API Gateway 调用此 Lambda；Lambda 校验与 GPU API 相同的生成请求后，将任务发到 SQS。Vast.ai worker（`server/wan22` 的 `sqs_consumer`，配 `SQS_QUEUE_URL` 即启用）主动消费 SQS，因此不需要 Vast.ai GPU 暴露随机 URL；凭证用注入的 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`（与 S3 上传共用身份），权限只需队列的 `ReceiveMessage` / `DeleteMessage` / `ChangeMessageVisibility`。
 
 ## 配置
 

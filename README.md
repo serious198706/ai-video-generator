@@ -6,12 +6,13 @@ Java 直接打 **GPU FastAPI**（`./start.sh`，默认 `:8000`）。流程只有
 
 ```
 server/
-  start.sh deploy.sh requirements.txt .env.example README.md JAVA.md
+  start.sh deploy.sh setup-aws.sh requirements.txt .env.example README.md JAVA.md
   wan22/
     config.py
     log.py        按日滚动的 wan22.log
     api/          POST /v1/generate、查询任务、/health /ready
     tasks/        store.py 任务落库（SQLite 留档）+ runner.py 单任务流水线
+                  + sqs_consumer.py SQS 长轮询接单（可选）
     infer/        Wan pipeline
     media/        下图、上传、webhook
     net/          URL 白名单 / SSRF
@@ -83,6 +84,8 @@ cp .env.example .env
 ./start.sh
 ```
 
+`deploy.sh` 装完依赖后会调用 `setup-aws.sh`：交互式问专用 IAM 用户的 Access Key / Secret / Region，先用 STS 验一次，通过后写进 `.env`（`chmod 600`，已在 `.gitignore`）。空回车跳过；非交互环境（CI / 云-init）只读环境变量、不落盘；`WAN22_AWS_SETUP=0 ./deploy.sh` 可整体跳过。key 轮换直接 `./setup-aws.sh --force`，不用重跑部署。
+
 `start.sh` 监听 `0.0.0.0:8000`，长时间跑请用 `screen`。第一次默认跳过 Foley。1080p 需要 compact 超分：`./deploy.sh` 默认会装（`WAN22_UPSCALE_SKIP=0`）。
 
 干净 Ubuntu 26.04（裸金属，没有 DLAMI）先做系统层，再走上面的 `deploy.sh`：
@@ -134,6 +137,17 @@ GPU 本机异常告警、Mac 上每小时/每日抽日志，见 [ops/README.md](
 ## 任务
 
 无队列。进程里只有一个执行位：`POST /v1/generate` 抢到位就建档（状态直接是 `running`）并在后台线程跑「下图 → I2V →（1080p 超分）→（Foley）→ 上传 S3 → webhook」；抢不到就 `429`，要不要重投由 Java 端决定。**失败不重试**，直接落 `failed` + 短码并回调。
+
+## SQS 接单（可选，vast.ai）
+
+配了 `SQS_QUEUE_URL` 后启动一个后台线程长轮询 SQS（消息格式即 `lambda_api` 入队的 JSON）。与 HTTP POST **共用同一个执行位**：执行位被占时消息 `ChangeMessageVisibility` 退回（`SQS_BUSY_BACKOFF` 秒后再投），进程内不排队。
+
+- 幂等：消息自带 `task_id`，直接作为任务主键建档。进程崩溃导致的重复投递会撞主键——已有终态就删消息，还在跑就退回等下一轮。
+- 可见性：生成可能十几分钟，看门线程每 `SQS_HEARTBEAT_SECONDS`（默认 120s）续一次 `SQS_VISIBILITY_TIMEOUT`（默认 600s），任务到终态后删除消息。
+- 坏消息：校验失败或 `ApproximateReceiveCount >= SQS_MAX_RECEIVE`（默认 5）时建档判死、照常发一次失败 webhook、删除消息，不会无限重投。队列上仍可叠加 DLQ。
+- 凭证：vast.ai 没有 IAM Role，用 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`（与 S3 上传共用同一身份），IAM 需要 `sqs:ReceiveMessage` / `DeleteMessage` / `ChangeMessageVisibility`。`./deploy.sh` 会引导写入，也可单独跑 `./setup-aws.sh`。
+- 关掉方式：把 `SQS_QUEUE_URL` 留空即可，HTTP 直打不受影响。
+
 
 任务落在 SQLite（`WAN22_TASK_DB`，默认 `<WAN22_DATA_DIR>/tasks.db`，WAL 模式）里，只做留档：`/v1/tasks/{id}` 从库里读，进程重启后历史任务仍可查。重启时库里残留的 `running` 会被一次性判死为 `failed` / `interrupted` 并补发 webhook，免得 Java 端一直等。想事后翻账直接查库：
 

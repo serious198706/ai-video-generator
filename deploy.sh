@@ -121,6 +121,16 @@ python -c "import torch; assert torch.cuda.is_available(), 'torch.cuda.is_availa
 
 python -m pip install --upgrade -r "$SCRIPT_DIR/requirements.txt"
 
+# AWS 凭证：vast.ai 没有 IAM Role，SQS 接单和 S3 上传都靠专用 IAM 用户的 key。
+# 交互式终端才会问；非交互（CI / 云-init）跳过，由环境变量直接注入。
+# 已配过就不再问，轮换用 ./setup-aws.sh --force。WAN22_AWS_SETUP=0 可完全跳过。
+if [[ "${WAN22_AWS_SETUP:-1}" == "1" ]]; then
+  "$SCRIPT_DIR/setup-aws.sh" || {
+    echo "[wan22] setup-aws.sh failed; fix it and rerun, or WAN22_AWS_SETUP=0 ./deploy.sh" >&2
+    exit 1
+  }
+fi
+
 if ! command -v hf >/dev/null 2>&1; then
   echo "[wan22] requirements 安装后仍找不到 hf 命令" >&2
   exit 1
