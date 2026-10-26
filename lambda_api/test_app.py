@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 os.environ.setdefault("WAN22_DATA_DIR", "/tmp/wan22-lambda-test-data")
+os.environ["S3_BUCKET"] = ""  # 单测不写真实 S3
 sys.path.insert(0, str(ROOT))
 
 from fastapi.testclient import TestClient  # noqa: E402

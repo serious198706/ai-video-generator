@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 os.environ.setdefault("WAN22_DRY_RUN", "1")
+os.environ["WAN22_S3_BUCKET"] = ""  # 单测不写真实 S3
 os.environ.setdefault("WAN22_PRELOAD", "0")
 os.environ.setdefault("WAN22_FOLEY_ENABLE", "0")
 os.environ.setdefault("WAN22_UPSCALE_ENABLE", "0")

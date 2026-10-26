@@ -5,11 +5,13 @@ import sys
 import tempfile
 import time
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 os.environ.setdefault("WAN22_DRY_RUN", "1")
+os.environ["WAN22_S3_BUCKET"] = ""  # 单测不写真实 S3
 os.environ.setdefault("WAN22_PRELOAD", "0")
 os.environ.setdefault("WAN22_FOLEY_ENABLE", "0")
 os.environ.setdefault("WAN22_UPSCALE_ENABLE", "0")
@@ -139,7 +141,8 @@ class GenerateApiTests(unittest.TestCase):
             self.assertEqual(task["seed"], 123)
 
     def test_interrupted_running_task_fails_on_restart(self):
-        task_id = "interruptedtask0000000000000000ff"
+        # 固定 id 会在 data-test 里跨轮次残留，重复跑就撞主键；每轮换一个。
+        task_id = uuid.uuid4().hex
         store.create_task(
             task_id,
             {

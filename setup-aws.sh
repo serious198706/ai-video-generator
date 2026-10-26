@@ -6,7 +6,7 @@
 #   ./setup-aws.sh                 # 缺什么问什么，已有的跳过
 #   ./setup-aws.sh --force         # 重新输入整套（轮换 key 时用）
 # 非交互：直接带环境变量跑，不落盘
-#   AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_DEFAULT_REGION=ap-northeast-1 ./deploy.sh
+#   AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_DEFAULT_REGION=us-east-1 ./deploy.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -64,7 +64,7 @@ if [[ -z "$secret_key" ]]; then
   exit 1
 fi
 
-default_region="${current_region:-${AWS_DEFAULT_REGION:-${WAN22_S3_REGION:-ap-northeast-1}}}"
+default_region="${current_region:-${AWS_DEFAULT_REGION:-${WAN22_S3_REGION:-us-east-1}}}"
 read -r -p "AWS Region [$default_region]: " region || region=""
 region="${region:-$default_region}"
 

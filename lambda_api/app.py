@@ -10,6 +10,7 @@ import boto3
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
+from lambda_api import status
 from wan22.api.schemas import GenerateRequest
 from wan22.net.urlguard import UrlError, assert_https_url, assert_image_source
 
@@ -106,10 +107,20 @@ def enqueue_generation(body: GenerateRequest):
         raise HTTPException(503, "failed to enqueue task") from exc
 
     logger.info("enqueued task=%s message=%s", task_id, result.get("MessageId"))
+    # 先入队再写 queued：写状态失败只丢可观测性，不影响已入队的任务。
+    status.write_queued(task_id, task)
     return JSONResponse(
         {"id": task_id, "task_id": task_id, "status": "queued"},
         status_code=202,
     )
+
+
+@app.get("/v1/tasks/{task_id}")
+def get_task(task_id: str):
+    try:
+        return status.describe(task_id)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
 
 
 @app.get("/health")

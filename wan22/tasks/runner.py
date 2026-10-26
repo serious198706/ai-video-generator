@@ -10,7 +10,7 @@ from wan22.infer import generate
 from wan22.infer.foley import FoleyError, add_audio
 from wan22.infer.upscale import UpscaleError, upscale_video
 from wan22.log import get_logger
-from wan22.media import download, webhook
+from wan22.media import download, status, webhook
 from wan22.media.upload import upload_video
 from wan22.net.urlguard import UrlError
 from wan22.tasks import store
@@ -78,6 +78,8 @@ def _preload() -> None:
 
 def _notify_all(tasks: list[dict[str, Any]]) -> None:
     for task in tasks:
+        # 重启判死的任务也要落状态文件，否则查询端会一直看到 generating。
+        status.write(task["id"], "failed", error=task.get("error"))
         try:
             webhook.notify(task)
         except Exception:
@@ -125,6 +127,14 @@ def _run(task_id: str) -> dict[str, Any] | None:
         upscale_ok = 0
         used_seed = task.get("seed")
         gen_started = time.monotonic()
+        status.write(
+            task_id,
+            "generating",
+            duration=task.get("duration"),
+            resolution=task.get("resolution"),
+            steps=task.get("steps"),
+            audio=bool(task.get("audio")),
+        )
         try:
             used_seed = generate.generate_video(
                 prompt=task["prompt"],
@@ -340,7 +350,10 @@ def _log_timing(
 
 
 def _finish(task_id: str, outcome: dict[str, Any]) -> None:
-    """落终态再回调 Java。失败不重投，短码直接给出去。"""
+    """落终态 → 写状态文件 → 回调 Java。失败不重投，短码直接给出去。
+
+    状态文件必须在 webhook 之前写：Java 在回调里立刻查 S3 也要能看到终态。
+    """
     if outcome["status"] == "succeeded":
         store.update_task(
             task_id,
@@ -349,9 +362,16 @@ def _finish(task_id: str, outcome: dict[str, Any]) -> None:
             seed=outcome.get("seed"),
             video_url=outcome.get("video_url"),
         )
+        status.write(
+            task_id,
+            "succeeded",
+            seed=outcome.get("seed"),
+            video_url=outcome.get("video_url"),
+        )
     else:
         error = outcome.get("error") or "generate_failed"
         store.update_task(task_id, status="failed", error=error, video_url=None)
+        status.write(task_id, "failed", error=error)
         logger.warning("failed task=%s error=%s", task_id, error)
     task = store.get_task(task_id)
     if task:

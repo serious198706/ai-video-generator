@@ -14,7 +14,7 @@ server/
     tasks/        store.py 任务落库（SQLite 留档）+ runner.py 单任务流水线
                   + sqs_consumer.py SQS 长轮询接单（可选）
     infer/        Wan pipeline
-    media/        下图、上传、webhook
+    media/        下图、上传、状态文件、webhook
     net/          URL 白名单 / SSRF
 ```
 
@@ -147,6 +147,15 @@ GPU 本机异常告警、Mac 上每小时/每日抽日志，见 [ops/README.md](
 - 坏消息：校验失败或 `ApproximateReceiveCount >= SQS_MAX_RECEIVE`（默认 5）时建档判死、照常发一次失败 webhook、删除消息，不会无限重投。队列上仍可叠加 DLQ。
 - 凭证：vast.ai 没有 IAM Role，用 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`（与 S3 上传共用同一身份），IAM 需要 `sqs:ReceiveMessage` / `DeleteMessage` / `ChangeMessageVisibility`。`./deploy.sh` 会引导写入，也可单独跑 `./setup-aws.sh`。
 - 关掉方式：把 `SQS_QUEUE_URL` 留空即可，HTTP 直打不受影响。
+
+## 任务状态文件
+
+GPU 不看外部 API 也能上报进度：每个任务在 S3 写**一个**状态对象 `{WAN22_STATUS_PREFIX}/status/{task_id}.json`（默认前缀同 `WAN22_S3_PREFIX`，即 `wan22/status/...`），HTTP POST 和 SQS 两条入口都写。
+
+- 用单 key 覆盖写，不做 `.pending` → `.generating` 改名（S3 没有 rename，copy+delete 中间会查到 0 或 2 个文件）；`PutObject` 原子，永远只读到一个对象，还能塞下 `duration`/`resolution`/`seed`/`video_url`/`error`/`receive_count`/入参。
+- 写入点：接单写 `pending` → 推理前写 `generating` → 终态写 `succeeded`/`failed`（在 webhook **之前**写，Java 回调里立刻查也能看到）→ 重启判死的任务由启动流程补写 `failed`/`interrupted`。
+- 状态写入是旁路：S3 报错只记日志，绝不影响生成、上传和回调。`WAN22_S3_BUCKET` 没配则不写。
+- 消费端：`lambda_api` 的 `GET /v1/tasks/{id}` 直接读这个对象（见 [lambda_api/README.md](lambda_api/README.md)），`generating` 超时判定为 `stalled`。
 
 
 任务落在 SQLite（`WAN22_TASK_DB`，默认 `<WAN22_DATA_DIR>/tasks.db`，WAL 模式）里，只做留档：`/v1/tasks/{id}` 从库里读，进程重启后历史任务仍可查。重启时库里残留的 `running` 会被一次性判死为 `failed` / `interrupted` 并补发 webhook，免得 Java 端一直等。想事后翻账直接查库：

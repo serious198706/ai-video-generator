@@ -57,11 +57,17 @@ SPATIAL_MULTIPLE = int(os.environ.get("WAN22_SPATIAL_MULTIPLE", "16"))
 MAX_FRAMES = int(os.environ.get("WAN22_MAX_FRAMES", "321"))
 VIDEO_QUALITY = int(os.environ.get("WAN22_VIDEO_QUALITY", "6"))
 
-S3_BUCKET = os.environ.get("WAN22_S3_BUCKET", "")
-S3_REGION = os.environ.get("WAN22_S3_REGION", os.environ.get("AWS_DEFAULT_REGION", ""))
-S3_PREFIX = os.environ.get("WAN22_S3_PREFIX", "wan22/")
+S3_BUCKET = os.environ.get(
+    "WAN22_S3_BUCKET", "generated-video-905641673118-us-east-1-an"
+)
+S3_REGION = os.environ.get("WAN22_S3_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-east-1"))
+S3_PREFIX = os.environ.get("WAN22_S3_PREFIX", "video/wan22/")
 S3_PUBLIC_BASE_URL = os.environ.get("WAN22_S3_PUBLIC_BASE_URL", "").rstrip("/")
 S3_ENDPOINT = os.environ.get("WAN22_S3_ENDPOINT", "")
+
+# 任务状态文件（单 key 覆盖写）：{STATUS_PREFIX}/status/{task_id}.json。
+# 默认跟 S3_PREFIX 走（video/wan22/status/...）；设空则落在桶根 status/ 下。
+STATUS_PREFIX = os.environ.get("WAN22_STATUS_PREFIX", S3_PREFIX)
 
 # SQS 接单（可选）。空则只收 HTTP POST。凭证与 S3 共用 AWS_* 环境变量。
 SQS_QUEUE_URL = os.environ.get("SQS_QUEUE_URL", "").strip()

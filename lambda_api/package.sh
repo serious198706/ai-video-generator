@@ -25,7 +25,7 @@ fi
 
 rsync -a --exclude '__pycache__' --exclude '*.pyc' "$ROOT/wan22/" "$PKG/wan22/"
 rsync -a --exclude '__pycache__' --exclude '*.pyc' --exclude 'package.sh' \
-  "$ROOT/lambda_api/" "$PKG/lambda_api/"
+  --exclude 'test_*.py' "$ROOT/lambda_api/" "$PKG/lambda_api/"
 rm -rf "$PKG/wan22/infer" "$PKG/wan22/media" \
   "$PKG/wan22/tasks/runner.py" "$PKG/wan22/api/app.py"
 

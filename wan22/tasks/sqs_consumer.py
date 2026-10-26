@@ -13,7 +13,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from wan22 import config
 from wan22.api.schemas import GenerateRequest
 from wan22.log import get_logger
-from wan22.media import webhook
+from wan22.media import status, webhook
 from wan22.net.urlguard import UrlError, assert_image_source
 from wan22.tasks import runner, store
 
@@ -144,6 +144,13 @@ def _handle(message: dict[str, Any]) -> None:
         return
 
     logger.info("dequeued task=%s receive=%s", task_id, receive_count)
+    # 状态文件带上入参，事后能直接看出这台机器收到了什么。
+    status.write(
+        task_id,
+        "pending",
+        receive_count=receive_count,
+        request=request.model_dump(by_alias=True, exclude_none=True),
+    )
     # 后台线程跑流水线；看门线程按心跳续 visibility，终态后删消息。
     runner.spawn(task_id)
     threading.Thread(
@@ -240,6 +247,7 @@ def _fail_and_delete(task_id: str, receipt: str, body_raw: str, error: str) -> N
         store.update_task(task_id, status="failed", error=error, video_url=None)
         task = store.get_task(task_id)
         if task:
+            status.write(task_id, "failed", error=error)
             webhook.notify(task)
     except Exception:
         logger.exception("failed to record poison task=%s", task_id)

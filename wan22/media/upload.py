@@ -18,7 +18,8 @@ def assert_configured() -> None:
         raise RuntimeError("WAN22_S3_BUCKET is not set")
 
 
-def _client_s3():
+def client():
+    """S3 客户端单例。状态文件（media/status.py）也共用这一份。"""
     global _client
     if _client is None:
         kwargs: dict = {
@@ -57,7 +58,7 @@ def upload_video(path: str | Path, *, object_name: str | None = None) -> str:
     path = Path(path)
     key = _object_key(object_name or path.name)
     extra = {"ContentType": "video/mp4"}
-    _client_s3().upload_file(str(path), config.S3_BUCKET, key, ExtraArgs=extra)
+    client().upload_file(str(path), config.S3_BUCKET, key, ExtraArgs=extra)
     url = public_url(key)
     logger.info("uploaded s3://%s/%s -> %s", config.S3_BUCKET, key, url)
     return url

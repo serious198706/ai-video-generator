@@ -10,6 +10,7 @@ from wan22 import config
 from wan22.api.schemas import GenerateRequest
 from wan22.infer import generate
 from wan22.log import get_logger, setup_logging
+from wan22.media import status
 from wan22.media.upload import assert_configured as assert_s3
 from wan22.net.urlguard import UrlError, assert_https_url, assert_image_source
 from wan22.tasks import runner, store
@@ -134,6 +135,8 @@ def create_generation(body: GenerateRequest):
         runner.release(task_id)
         logger.exception("failed to start task=%s", task_id)
         raise HTTPException(500, "failed to start task") from exc
+
+    status.write(task_id, "pending", source="http")
 
     logger.info(
         "accepted task=%s duration=%s resolution=%s steps=%s quality=%s audio=%s webhook=%s",
