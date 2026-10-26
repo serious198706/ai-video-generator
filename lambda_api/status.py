@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 AWS_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
 S3_BUCKET = os.environ.get("S3_BUCKET", "").strip()
-STATUS_PREFIX = os.environ.get("STATUS_PREFIX", "video/").strip().strip("/")
+STATUS_PREFIX = os.environ.get("STATUS_PREFIX", "video/wan22/").strip().strip("/")
 # 本地/自建 S3 兼容端点（可选）。线上留空走默认 AWS 端点。
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "").strip()
 # generating 超过这个秒数没有更新就报 stalled：GPU 挂了/重启了/卡住。
@@ -58,7 +58,7 @@ def read(task_id: str) -> dict[str, Any] | None:
 
 
 def write_queued(task_id: str, request: dict[str, Any]) -> None:
-    """入队时写 queued，让查询端能区分"排着队"和"没这单"。失败不影响入队。"""
+    """入队前写 queued，让查询端能区分"排着队"和"没这单"。失败不影响入队。"""
     if not S3_BUCKET:
         return
     payload = {
@@ -77,6 +77,28 @@ def write_queued(task_id: str, request: dict[str, Any]) -> None:
         )
     except (BotoCoreError, ClientError):
         logger.exception("status write failed task=%s", task_id)
+
+
+def write_failed(task_id: str, error: str) -> None:
+    """入队失败时把 queued 判成 failed，避免留下永远 queued 的孤儿。失败只记日志。"""
+    if not S3_BUCKET:
+        return
+    payload = {
+        "task_id": task_id,
+        "status": "failed",
+        "error": error,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        _s3.put_object(
+            Bucket=S3_BUCKET,
+            Key=key(task_id),
+            Body=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            ContentType="application/json",
+            CacheControl="no-store",
+        )
+    except (BotoCoreError, ClientError):
+        logger.exception("status failed-write failed task=%s", task_id)
 
 
 def describe(task_id: str) -> dict[str, Any]:

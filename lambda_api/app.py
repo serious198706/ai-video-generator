@@ -96,6 +96,10 @@ def enqueue_generation(body: GenerateRequest):
         "audio": bool(body.audio),
     }
 
+    # 先写 queued 再入队：空闲 worker 长轮询几乎立刻能取到消息并写 pending/generating，
+    # queued 若后写会把它覆盖回去（状态回退，且 queued 不被 stalled 判定）。写失败只丢可观测性。
+    status.write_queued(task_id, task)
+
     try:
         logger.info("sending task=%s", task_id)
         result = _sqs.send_message(
@@ -103,12 +107,12 @@ def enqueue_generation(body: GenerateRequest):
             MessageBody=json.dumps(task, ensure_ascii=False),
         )
     except Exception as exc:
+        # 入队失败：把刚写的 queued 判成 failed，避免留下永远 queued 的孤儿。
+        status.write_failed(task_id, "enqueue_failed")
         logger.exception("failed to enqueue task=%s", task_id)
         raise HTTPException(503, "failed to enqueue task") from exc
 
     logger.info("enqueued task=%s message=%s", task_id, result.get("MessageId"))
-    # 先入队再写 queued：写状态失败只丢可观测性，不影响已入队的任务。
-    status.write_queued(task_id, task)
     return JSONResponse(
         {"id": task_id, "task_id": task_id, "status": "queued"},
         status_code=202,

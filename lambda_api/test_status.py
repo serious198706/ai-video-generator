@@ -115,6 +115,44 @@ class LambdaStatusTests(unittest.TestCase):
         self.assertEqual(kwargs["Key"], f"video/wan22/status/{task_id}.json")
         self.assertEqual(json.loads(kwargs["Body"])["status"], "queued")
 
+    def test_enqueue_writes_queued_before_send(self) -> None:
+        order: list[str] = []
+        self.s3.put_object.side_effect = lambda *a, **k: order.append("queued")
+        with (
+            patch.object(lambda_app, "QUEUE_URL", "https://sqs.test/queue"),
+            patch.object(lambda_app, "_sqs") as sqs,
+            patch.object(lambda_app, "assert_image_source", side_effect=lambda v, *a, **k: v),
+        ):
+            def _send(*a, **k):
+                order.append("send")
+                return {"MessageId": "m1"}
+
+            sqs.send_message.side_effect = _send
+            with TestClient(lambda_app.app) as client:
+                response = client.post(
+                    "/v1/generate",
+                    json={"image": "https://images.example.com/a.jpg", "duration": 5},
+                )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(order, ["queued", "send"])
+
+    def test_enqueue_failure_writes_failed(self) -> None:
+        with (
+            patch.object(lambda_app, "QUEUE_URL", "https://sqs.test/queue"),
+            patch.object(lambda_app, "_sqs") as sqs,
+            patch.object(lambda_app, "assert_image_source", side_effect=lambda v, *a, **k: v),
+        ):
+            sqs.send_message.side_effect = RuntimeError("boom")
+            with TestClient(lambda_app.app) as client:
+                response = client.post(
+                    "/v1/generate",
+                    json={"image": "https://images.example.com/a.jpg", "duration": 5},
+                )
+        self.assertEqual(response.status_code, 503)
+        writes = [json.loads(call.kwargs["Body"]) for call in self.s3.put_object.call_args_list]
+        self.assertEqual([w["status"] for w in writes], ["queued", "failed"])
+        self.assertEqual(writes[-1]["error"], "enqueue_failed")
+
 
 if __name__ == "__main__":
     unittest.main()

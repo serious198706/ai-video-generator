@@ -11,18 +11,18 @@ from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 os.environ.setdefault("WAN22_DRY_RUN", "1")
-os.environ["WAN22_S3_BUCKET"] = ""  # 单测不写真实 S3
 os.environ.setdefault("WAN22_PRELOAD", "0")
 os.environ.setdefault("WAN22_FOLEY_ENABLE", "0")
 os.environ.setdefault("WAN22_UPSCALE_ENABLE", "0")
 os.environ.setdefault("WAN22_IMAGE_HOSTS", "")
 os.environ.setdefault("WAN22_WEBHOOK_HOSTS", "")
+os.environ["WAN22_S3_BUCKET"] = ""  # 单测不写真实 S3；status 走 mock
 os.environ["WAN22_DATA_DIR"] = str(ROOT / "data-test")
 os.environ["WAN22_LOG_DIR"] = str(ROOT / "logs-test")
 sys.path.insert(0, str(ROOT))
 
 from wan22.net.urlguard import UrlError  # noqa: E402
-from wan22.tasks import runner, sqs_consumer, store  # noqa: E402
+from wan22.tasks import runner, sqs_consumer  # noqa: E402
 
 
 def _fake_https(url, _allowlist, *, kind, allow_private=False):
@@ -47,13 +47,12 @@ def _message(body: dict, receipt: str = "r1", receive: int = 1) -> dict:
     }
 
 
-def _wait_terminal(task_id: str, tries: int = 200) -> dict:
+def _wait_current_gone(task_id: str, tries: int = 300) -> None:
     for _ in range(tries):
-        task = store.get_task(task_id)
-        if task and task["status"] in {"succeeded", "failed"}:
-            return task
+        if runner.current() != task_id:
+            return
         time.sleep(0.02)
-    raise AssertionError(f"task {task_id} never finished")
+    raise AssertionError(f"task {task_id} still holding the slot")
 
 
 def _wait_called(mock, tries: int = 200) -> None:
@@ -67,7 +66,10 @@ def _wait_called(mock, tries: int = 200) -> None:
 class SqsConsumerTests(unittest.TestCase):
     def setUp(self) -> None:
         sqs_consumer._stop.clear()
-        store.reset_client()
+        # patch 共享模块函数：consumer 和 runner 各自 import 的 status 都指向这里。
+        self.mock_is_terminal = patch("wan22.media.status.is_terminal", return_value=False).start()
+        self.mock_write = patch("wan22.media.status.write").start()
+        self.addCleanup(patch.stopall)
 
     def tearDown(self) -> None:
         sqs_consumer.stop()
@@ -110,21 +112,21 @@ class SqsConsumerTests(unittest.TestCase):
         with (
             patch.object(sqs_consumer, "_sqs", return_value=sqs),
             patch("wan22.tasks.sqs_consumer.assert_image_source", side_effect=_fake_https),
-            patch("wan22.tasks.sqs_consumer.config.SQS_HEARTBEAT_SECONDS", 0.05),
+            patch.object(sqs_consumer.config, "SQS_HEARTBEAT_SECONDS", 0.05),
             patch("wan22.media.download.download_image", side_effect=_fake_download),
         ):
             sqs_consumer._handle(message)
-            task = _wait_terminal(task_id)
+            _wait_current_gone(task_id)
             _wait_called(sqs.delete_message)
 
-        self.assertEqual(task["status"], "succeeded")
-        self.assertTrue(task["video_url"])
+        # pending -> generating -> succeeded 全写进了状态文件
+        written = [call.args[1] for call in self.mock_write.call_args_list]
+        self.assertEqual(written, ["pending", "generating", "succeeded"])
         self.assertEqual(sqs.delete_message.call_args.kwargs["ReceiptHandle"], "r1")
 
     def test_handle_duplicate_terminal_deletes(self) -> None:
         task_id = uuid.uuid4().hex
-        store.create_task(task_id, {"image_url": "https://cdn.example.com/a.jpg", "duration": 5})
-        store.update_task(task_id, status="succeeded", video_url="https://x/y.mp4")
+        self.mock_is_terminal.return_value = True
         message = _message({"task_id": task_id, "image_url": "https://cdn.example.com/a.jpg"})
         sqs = MagicMock()
         with (
@@ -133,8 +135,9 @@ class SqsConsumerTests(unittest.TestCase):
         ):
             sqs_consumer._handle(message)
         sqs.delete_message.assert_called_once()
+        runner.release(task_id)  # 不应占过位，保险起见
 
-    def test_handle_busy_requeues_without_creating(self) -> None:
+    def test_handle_busy_requeues_without_spawning(self) -> None:
         task_id = uuid.uuid4().hex
         message = _message({"task_id": task_id, "image_url": "https://cdn.example.com/a.jpg"})
         sqs = MagicMock()
@@ -147,7 +150,8 @@ class SqsConsumerTests(unittest.TestCase):
                 sqs_consumer._handle(message)
         finally:
             runner.release("http-slot")
-        self.assertIsNone(store.get_task(task_id))
+        self.assertIsNone(runner.current())
+        self.mock_write.assert_not_called()
         sqs.delete_message.assert_not_called()
         sqs.change_message_visibility.assert_called_once()
 
@@ -161,13 +165,9 @@ class SqsConsumerTests(unittest.TestCase):
         with (
             patch.object(sqs_consumer, "_sqs", return_value=sqs),
             patch("wan22.tasks.sqs_consumer.assert_image_source", side_effect=_fake_https),
-            patch("wan22.tasks.sqs_consumer.config.SQS_MAX_RECEIVE", 5),
         ):
             sqs_consumer._handle(message)
-        task = store.get_task(task_id)
-        self.assertIsNotNone(task)
-        self.assertEqual(task["status"], "failed")
-        self.assertEqual(task["error"], "poisoned")
+        self.mock_write.assert_called_once_with(task_id, "failed", error="poisoned")
         sqs.delete_message.assert_called_once()
 
 
