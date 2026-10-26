@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import threading
-import time
 from typing import Any
 
 import boto3
@@ -15,14 +13,14 @@ from wan22.api.schemas import GenerateRequest
 from wan22.log import get_logger
 from wan22.media import status, webhook
 from wan22.net.urlguard import UrlError, assert_image_source
-from wan22.tasks import runner, store
+from wan22.tasks import runner
 
 logger = get_logger(__name__)
 
 # vast.ai 上没有 IAM Role：凭证走 AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY 环境变量，
 # 权限只需要目标队列的 ReceiveMessage / DeleteMessage / ChangeMessageVisibility /
-# GetQueueAttributes。进程不设队列：HTTP POST 和 SQS 共用 runner 的单执行位，
-# 抢不到位的消息 ChangeMessageVisibility 退避，绝不本地堆积。
+# GetQueueAttributes。进程不排队：执行位被占的消息 ChangeMessageVisibility 退回。
+# 无本地留档（SQLite 已删）：幂等看 S3 状态文件，崩溃恢复靠 SQS 重投。
 _stop = threading.Event()
 _thread: threading.Thread | None = None
 _client = None
@@ -34,14 +32,11 @@ def enabled() -> bool:
 
 
 def start() -> None:
-    """lifespan 里调用。未配 SQS_QUEUE_URL 则整个跳过，HTTP 直打不受影响。"""
+    """lifespan 里调用。未配 SQS_QUEUE_URL 则整个跳过。"""
     global _thread
     if not enabled():
         logger.info("sqs consumer disabled: SQS_QUEUE_URL is empty")
         return
-    if config.DRY_RUN:
-        # dry-run 常在本机起，没有真实队列时不至于刷错误；配了队列也允许跑（会真的消费）。
-        logger.info("sqs consumer starting in dry-run queue=%s", config.SQS_QUEUE_URL)
     if _thread is not None:
         return
     _stop.clear()
@@ -73,7 +68,7 @@ def _sqs():
 def _loop() -> None:
     idle_backoff = 1.0
     while not _stop.is_set():
-        # 执行位空着才去取消息；HTTP POST 正在跑时轮询只会白拉。
+        # 执行位空着才去取消息；上一单还在跑时轮询只会白拉。
         if runner.current() is not None:
             _stop.wait(2)
             continue
@@ -102,12 +97,13 @@ def _handle(message: dict[str, Any]) -> None:
     task_id, request, error = _parse(body_raw)
 
     if error is not None:
-        # lambda 侧已按同一套规则校验过；走到这里基本是坏消息，按 DLQ 前的次数处理。
-        if task_id and receive_count >= config.SQS_MAX_RECEIVE:
-            _fail_and_delete(task_id, receipt, body_raw, "invalid_request")
-        elif receive_count >= config.SQS_MAX_RECEIVE:
-            logger.error("drop poison message after %s receives: %s", receive_count, error)
-            _delete(receipt)
+        # lambda 侧已按同一套规则校验过；走到这里基本是坏消息，到次数就判死删除。
+        if receive_count >= config.SQS_MAX_RECEIVE:
+            if task_id:
+                _fail_and_delete(task_id, receipt, error)
+            else:
+                logger.error("drop poison message after %s receives: %s", receive_count, error)
+                _delete(receipt)
         else:
             logger.warning("reject message (receive=%s): %s", receive_count, error)
             _requeue(receipt, config.SQS_BUSY_BACKOFF)
@@ -116,33 +112,22 @@ def _handle(message: dict[str, Any]) -> None:
     assert task_id is not None and request is not None
     if receive_count >= config.SQS_MAX_RECEIVE:
         logger.error("task=%s hit max receive %s, fail and delete", task_id, receive_count)
-        _fail_and_delete(task_id, receipt, body_raw, "poisoned")
+        _fail_and_delete(task_id, receipt, "poisoned")
         return
 
-    # 执行位被 HTTP POST 抢走：消息退回队列稍后重投，不排队。
+    # 幂等：重复投递时 S3 状态文件已有终态就删消息；进行中/不存在则继续走。
+    if status.is_terminal(task_id):
+        logger.info("duplicate delivery, task=%s already terminal", task_id)
+        _delete(receipt)
+        return
+
+    # 执行位被占：消息退回队列稍后重投，进程内不排队。
     if not runner.reserve(task_id):
         logger.info("slot busy, requeue task=%s", task_id)
         _requeue(receipt, config.SQS_BUSY_BACKOFF)
         return
 
-    try:
-        _create_task(task_id, request)
-    except sqlite3.IntegrityError:
-        # 重复投递（上次进程崩在跑完前）。已在跑就退回等终态；已有终态直接删。
-        runner.release(task_id)
-        existing = store.get_task(task_id)
-        if existing and existing.get("status") != "running":
-            logger.info("duplicate delivery, task=%s already %s", task_id, existing["status"])
-            _delete(receipt)
-        else:
-            _requeue(receipt, config.SQS_BUSY_BACKOFF)
-        return
-    except Exception:
-        runner.release(task_id)
-        logger.exception("failed to create task=%s", task_id)
-        _requeue(receipt, config.SQS_BUSY_BACKOFF)
-        return
-
+    task = _build_task(task_id, request)
     logger.info("dequeued task=%s receive=%s", task_id, receive_count)
     # 状态文件带上入参，事后能直接看出这台机器收到了什么。
     status.write(
@@ -151,8 +136,7 @@ def _handle(message: dict[str, Any]) -> None:
         receive_count=receive_count,
         request=request.model_dump(by_alias=True, exclude_none=True),
     )
-    # 后台线程跑流水线；看门线程按心跳续 visibility，终态后删消息。
-    runner.spawn(task_id)
+    runner.spawn(task)
     threading.Thread(
         target=_watch_until_done,
         args=(task_id, receipt),
@@ -201,65 +185,41 @@ def _parse(body_raw: str) -> tuple[str | None, GenerateRequest | None, str | Non
     return task_id, request, None
 
 
-def _create_task(task_id: str, request: GenerateRequest) -> None:
-    store.create_task(
-        task_id,
-        {
-            "prompt": (request.prompt or "").strip() or config.DEFAULT_PROMPT,
-            "negative_prompt": (request.negative_prompt or "").strip() or config.NEGATIVE_PROMPT,
-            "image_url": request.image,
-            "last_image_url": request.last_image,
-            "first_frame_path": None,
-            "last_frame_path": None,
-            "duration": request.duration,
-            "resolution": request.resolution,
-            "webhook_url": request.webhook_url,
-            "seed": request.seed,
-            "steps": request.steps,
-            "quality": request.quality,
-            "audio": bool(request.audio),
-        },
-    )
+def _build_task(task_id: str, request: GenerateRequest) -> dict[str, Any]:
+    """内存里的任务字典：从消息直接来，不留档。"""
+    return {
+        "id": task_id,
+        "prompt": (request.prompt or "").strip() or config.DEFAULT_PROMPT,
+        "negative_prompt": (request.negative_prompt or "").strip() or config.NEGATIVE_PROMPT,
+        "image_url": request.image,
+        "last_image_url": request.last_image,
+        "duration": request.duration,
+        "resolution": request.resolution,
+        "webhook_url": request.webhook_url,
+        "seed": request.seed,
+        "steps": request.steps,
+        "quality": request.quality,
+        "audio": bool(request.audio),
+    }
 
 
-def _fail_and_delete(task_id: str, receipt: str, body_raw: str, error: str) -> None:
-    """坏消息也要让 Java 收到一次失败回调：能建档就建档后立刻判死。"""
-    try:
-        if store.get_task(task_id) is None:
-            data = json.loads(body_raw) if body_raw else {}
-            fields = data if isinstance(data, dict) else {}
-            store.create_task(
-                task_id,
-                {
-                    "prompt": fields.get("prompt"),
-                    "negative_prompt": fields.get("negative_prompt"),
-                    "image_url": fields.get("image_url"),
-                    "last_image_url": fields.get("last_image_url"),
-                    "duration": fields.get("duration") or 5,
-                    "resolution": fields.get("resolution"),
-                    "webhook_url": fields.get("webhook_url"),
-                    "seed": fields.get("seed"),
-                    "steps": fields.get("steps"),
-                    "quality": fields.get("quality"),
-                    "audio": bool(fields.get("audio")),
-                },
-            )
-        store.update_task(task_id, status="failed", error=error, video_url=None)
-        task = store.get_task(task_id)
-        if task:
-            status.write(task_id, "failed", error=error)
-            webhook.notify(task)
-    except Exception:
-        logger.exception("failed to record poison task=%s", task_id)
+def _fail_and_delete(task_id: str, receipt: str, error: str) -> None:
+    """坏消息也要让 Java 收到一次失败：写 S3 failed（带短码）+ webhook + 删消息。"""
+    logger.error("failing task=%s error=%s", task_id, error)
+    status.write(task_id, "failed", error=error)
+    webhook.notify({"id": task_id, "error": error, "status": "failed"})
     _delete(receipt)
 
 
 def _watch_until_done(task_id: str, receipt: str) -> None:
-    """生成可能跑十几分钟：每 SQS_HEARTBEAT_SECONDS 续一次 visibility，终态后删除消息。"""
+    """生成可能跑十几分钟：每 SQS_HEARTBEAT_SECONDS 续一次 visibility，终态后删消息。
+
+    终态由 _finish 先写 S3 状态文件，这里用轮询事件标志判断（不做本地留档查询）。
+    """
     while not _stop.is_set():
         _stop.wait(config.SQS_HEARTBEAT_SECONDS)
-        task = store.get_task(task_id)
-        if task is None or task.get("status") != "running":
+        if runner.current() != task_id:
+            # 执行位已释放 = 流水线跑完（_finish 已写终态）。
             _delete(receipt)
             return
         try:

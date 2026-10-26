@@ -1,8 +1,8 @@
-# Wan 2.2 Adapter API
+# Wan 2.2 GPU Worker
 
-给 Java 后端调用的图生视频服务，协议对齐 a2e / Pixverse adapter。
+无情的生成机器：从 SQS 拉任务 → 生成 → 上传 S3 → 写状态文件 → webhook 回调 → 删消息。部署在 vast.ai 上，接单走 `lambda_api`（Lambda + SQS），本机不暴露任何生成接口。
 
-Java 直接打 **GPU FastAPI**（`./start.sh`，默认 `:8000`）。流程只有一条直线：**POST 进来即开始生成 → 成片上传 S3/CloudFront → webhook 回调 Java**。没有队列、没有 Redis，单卡一次只跑一个任务，正在跑时再来的 POST 直接 `429`（由 Java 端决定何时重投）。任务过程落在本机 SQLite 里，只为留档，事后可查。推理仍是 WAMU Lightning I2V。480p 画布约 480×832；720p 约 720×1248；`1080p` 先按 720p 生成，再用 compact（realesr-general-x4v3）超到约 1080×1872。
+没有队列（进程内单执行位，忙时消息退回 SQS）、没有 Redis、没有 SQLite 留档。幂等靠 S3 状态文件，崩溃恢复靠 SQS 重投。推理是 WAMU Lightning I2V。480p 画布约 480×832；720p 约 720×1248；`1080p` 先按 720p 生成，再用 compact（realesr-general-x4v3）超到约 1080×1872。
 
 ```
 server/
@@ -10,56 +10,18 @@ server/
   wan22/
     config.py
     log.py        按日滚动的 wan22.log
-    api/          POST /v1/generate、查询任务、/health /ready
-    tasks/        store.py 任务落库（SQLite 留档）+ runner.py 单任务流水线
-                  + sqs_consumer.py SQS 长轮询接单（可选）
+    api/          /health /ready（仅本机探活），lifespan 里启动 SQS 消费
+    tasks/        runner.py 单任务流水线 + sqs_consumer.py SQS 长轮询
     infer/        Wan pipeline
     media/        下图、上传、状态文件、webhook
     net/          URL 白名单 / SSRF
 ```
 
-## 协议
+## 接单协议
 
-Java 调用端见 [JAVA.md](JAVA.md)（提交 / 查询 / webhook / 探活）。Base URL 用 GPU 的 `http://<host>:8000`。
+Java 只跟 `lambda_api`（API Gateway + Lambda）打交道，协议见 [lambda_api/README.md](lambda_api/README.md) 与 [JAVA.md](JAVA.md)。SQS 消息体 = 入队 JSON：`task_id` + `prompt` / `negative_prompt` / `image_url` / `last_image_url` / `duration` / `resolution` / `webhook_url` / `seed` / `steps` / `quality` / `audio`。
 
-`POST /v1/generate`，`application/json`，无鉴权。校验 HTTPS/白名单后立刻 `202`，同时后台线程已经在下图并推理（不要同步死等成片）：
-
-```json
-{ "id": "…", "task_id": "…", "status": "running" }
-```
-
-```json
-{
-  "image": "https://dxxx.cloudfront.net/a.jpg",
-  "prompt": "nsfwsks, she slowly turns her head",
-  "negativePrompt": "blurry",
-  "duration": 5,
-  "resolution": "540p",
-  "webhookUrl": "https://api.example.com/internal/wan/callback",
-  "steps": 6,
-  "quality": 6,
-  "seed": 123,
-  "lastImage": null,
-  "audio": true
-}
-```
-
-| 字段 | 必填 | 说明 |
-| --- | --- | --- |
-| `image` | 是 | HTTPS 图片 URL（JPEG / PNG / WebP / GIF 等）；接口校验后由本机 worker 下载并转成 JPEG |
-| `prompt` | 否 | 空则用 `WAN22_DEFAULT_PROMPT` |
-| `negativePrompt` | 否 | 会传给 pipeline；`guidance_scale=1` 时不生效 |
-| `duration` | 否 | `(0, 15]` 秒，默认 5 |
-| `resolution` | 否 | `480p` / `540p` / `720p` / `1080p`。480p 画布约 480×832；720p 约 720×1248；1080p 先 720p 再超分 |
-| `webhookUrl` | 否 | 成功和失败都会 POST |
-| `steps` / `quality` / `seed` / `lastImage` | 否 | Wan 私有字段；`quality` 为导出 1–10 |
-| `audio` | 否 | 是否配 Foley，默认 `false`。不传或 `null` 都不配音；传 `true` 才跑 Foley |
-
-`GET /v1/tasks/{id}` 读 SQLite 里的任务（接口没变，重启后旧任务照样查得到）。`/health` 探活；`/ready` 在模型未加载时 503。`/docs` 默认关闭。
-
-图片 URL 必须 https 且解析到公网（防 SSRF）。`WAN22_IMAGE_HOSTS` 有值才限制图床域名。Webhook 走 `WAN22_WEBHOOK_HOSTS`，**允许内网 IP**（Java 就在内网），但仍拒绝链路本地 / `169.254.169.254`；该项为空则不限制 host。
-
-Webhook body 与任务查询字段一致：`id`、`task_id`、`status`、`video_url`、`error`、`seed`、`duration`、`resolution`。成功和失败都回调一次，失败不重试推理。失败时 `error` 仅为短码：`generate_failed` / `upscale_failed` / `foley_failed` / `upload_failed` / `download_failed` / `interrupted`。配置了 `WAN22_WEBHOOK_SECRET` 时带 `X-Wan-Signature: sha256=…`。
+本机 HTTP 只剩 `/health`（探活）与 `/ready`（模型未加载时 503），不接生成请求。
 
 ## 配置
 
@@ -112,15 +74,7 @@ uvicorn wan22.api.app:app --port 8000
 
 `DRY_RUN` 写占位 mp4，不上传 S3，`video_url` 为 `http://127.0.0.1/dry-run/{id}.mp4`。
 
-测试生成：
-
-```bash
-curl -sS -X POST http://127.0.0.1:8000/v1/generate \
-  -H 'Content-Type: application/json' \
-  -d '{"image":"https://dxxx.cloudfront.net/a.jpg","prompt":"she turns her head","duration":5}'
-# 用返回的 id 轮询
-curl -sS http://127.0.0.1:8000/v1/tasks/<id>
-```
+本机测试生成：起一个本地 SQS 替身或直接用 `sqs_test/send_task.py` 往真队列发一条（`DRY_RUN=1` 时成片是占位 mp4，不真上传）。
 
 ## 日志
 
@@ -130,39 +84,30 @@ curl -sS http://127.0.0.1:8000/v1/tasks/<id>
 - 按日滚动：`logs/wan22.log.YYYY-MM-DD`（本地时区午夜，默认保留 30 天）
 - 同时打到 stdout，方便 journald / 终端
 
-记录接单、拒单（400/429/503）、推理开始/结束（含 seed、分辨率、耗时）、上传 URL、webhook 成败、进程重启后判死的任务。uvicorn access 也进同一文件。
+记录接单、拒单、推理开始/结束（含 seed、分辨率、耗时）、上传 URL、webhook 成败。uvicorn access 也进同一文件。
 
 GPU 本机异常告警、Mac 上每小时/每日抽日志，见 [ops/README.md](ops/README.md)。
 
-## 任务
+## 任务流（SQS 接单，vast.ai）
 
-无队列。进程里只有一个执行位：`POST /v1/generate` 抢到位就建档（状态直接是 `running`）并在后台线程跑「下图 → I2V →（1080p 超分）→（Foley）→ 上传 S3 → webhook」；抢不到就 `429`，要不要重投由 Java 端决定。**失败不重试**，直接落 `failed` + 短码并回调。
+配了 `SQS_QUEUE_URL` 即启动后台线程长轮询。进程里只有一个执行位：抢到位就跑「下图 → I2V →（1080p 超分）→（Foley）→ 上传 S3 → 写终态 → webhook → 删消息」；抢不到（上一单还在跑）消息 `ChangeMessageVisibility` 退回（`SQS_BUSY_BACKOFF` 秒后再投），进程内不排队。**失败不重试**，直接落 `failed` + 短码并回调。
 
-## SQS 接单（可选，vast.ai）
-
-配了 `SQS_QUEUE_URL` 后启动一个后台线程长轮询 SQS（消息格式即 `lambda_api` 入队的 JSON）。与 HTTP POST **共用同一个执行位**：执行位被占时消息 `ChangeMessageVisibility` 退回（`SQS_BUSY_BACKOFF` 秒后再投），进程内不排队。
-
-- 幂等：消息自带 `task_id`，直接作为任务主键建档。进程崩溃导致的重复投递会撞主键——已有终态就删消息，还在跑就退回等下一轮。
-- 可见性：生成可能十几分钟，看门线程每 `SQS_HEARTBEAT_SECONDS`（默认 120s）续一次 `SQS_VISIBILITY_TIMEOUT`（默认 600s），任务到终态后删除消息。
-- 坏消息：校验失败或 `ApproximateReceiveCount >= SQS_MAX_RECEIVE`（默认 5）时建档判死、照常发一次失败 webhook、删除消息，不会无限重投。队列上仍可叠加 DLQ。
+- 幂等：重复投递先查 S3 状态文件，已有终态就删消息。
+- 可见性：生成可能十几分钟，看门线程每 `SQS_HEARTBEAT_SECONDS`（默认 120s）续一次 `SQS_VISIBILITY_TIMEOUT`（默认 600s），执行位释放后删除消息。
+- 崩溃恢复：无本地留档，进程重启后上一单的事务全靠消息重投（visibility 过期自动重现）。重复生成同一任务理论上可能（崩溃在 webhook 之后、删消息之前），由 task_id 幂等挡住二次回调。
+- 坏消息：校验失败或 `ApproximateReceiveCount >= SQS_MAX_RECEIVE`（默认 5）时写 `failed` 状态、发一次失败 webhook、删除消息，不会无限重投。队列上仍可叠加 DLQ。
 - 凭证：vast.ai 没有 IAM Role，用 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`（与 S3 上传共用同一身份），IAM 需要 `sqs:ReceiveMessage` / `DeleteMessage` / `ChangeMessageVisibility`。`./deploy.sh` 会引导写入，也可单独跑 `./setup-aws.sh`。
-- 关掉方式：把 `SQS_QUEUE_URL` 留空即可，HTTP 直打不受影响。
 
 ## 任务状态文件
 
-GPU 不看外部 API 也能上报进度：每个任务在 S3 写**一个**状态对象 `{WAN22_STATUS_PREFIX}/status/{task_id}.json`（默认前缀同 `WAN22_S3_PREFIX`，即 `wan22/status/...`），HTTP POST 和 SQS 两条入口都写。
+GPU 不看外部 API 也能上报进度：每个任务在 S3 写**一个**状态对象 `{WAN22_STATUS_PREFIX}/status/{task_id}.json`（默认前缀同 `WAN22_S3_PREFIX`，即 `video/wan22/status/...`）。
 
 - 用单 key 覆盖写，不做 `.pending` → `.generating` 改名（S3 没有 rename，copy+delete 中间会查到 0 或 2 个文件）；`PutObject` 原子，永远只读到一个对象，还能塞下 `duration`/`resolution`/`seed`/`video_url`/`error`/`receive_count`/入参。
-- 写入点：接单写 `pending` → 推理前写 `generating` → 终态写 `succeeded`/`failed`（在 webhook **之前**写，Java 回调里立刻查也能看到）→ 重启判死的任务由启动流程补写 `failed`/`interrupted`。
+- 写入点：接单写 `pending` → 推理前写 `generating` → 终态写 `succeeded`/`failed`（在 webhook **之前**写，Java 回调里立刻查也能看到）。幂等判断也读它。
 - 状态写入是旁路：S3 报错只记日志，绝不影响生成、上传和回调。`WAN22_S3_BUCKET` 没配则不写。
 - 消费端：`lambda_api` 的 `GET /v1/tasks/{id}` 直接读这个对象（见 [lambda_api/README.md](lambda_api/README.md)），`generating` 超时判定为 `stalled`。
 
 
-任务落在 SQLite（`WAN22_TASK_DB`，默认 `<WAN22_DATA_DIR>/tasks.db`，WAL 模式）里，只做留档：`/v1/tasks/{id}` 从库里读，进程重启后历史任务仍可查。重启时库里残留的 `running` 会被一次性判死为 `failed` / `interrupted` 并补发 webhook，免得 Java 端一直等。想事后翻账直接查库：
-
-```bash
-sqlite3 data/tasks.db "select created_at,status,error,resolution,seed,video_url from tasks order by created_at desc limit 20"
-```
 
 ## 音频（可选）
 

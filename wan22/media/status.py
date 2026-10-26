@@ -51,3 +51,22 @@ def write(task_id: str, status: str, **fields: Any) -> None:
     except Exception:
         # 状态文件是旁路观测：网络/权限/凭证任何问题都不能让生成或回调失败。
         logger.exception("status write failed status=%s task=%s", status, task_id)
+
+
+def read(task_id: str) -> dict[str, Any] | None:
+    """读状态文件；没有对象或读失败都返回 None（幂等判断容忍误判：顶多重跑一次）。"""
+    if not config.S3_BUCKET:
+        return None
+    try:
+        obj = s3_client().get_object(Bucket=config.S3_BUCKET, Key=key(task_id))
+        data = json.loads(obj["Body"].read())
+    except Exception:
+        logger.exception("status read failed task=%s", task_id)
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def is_terminal(task_id: str) -> bool:
+    """该任务是否已经有终态（succeeded / failed）。幂等判断用。"""
+    data = read(task_id)
+    return bool(data) and data.get("status") in ("succeeded", "failed")

@@ -13,11 +13,10 @@ from wan22.log import get_logger
 from wan22.media import download, status, webhook
 from wan22.media.upload import upload_video
 from wan22.net.urlguard import UrlError
-from wan22.tasks import store
 
 logger = get_logger(__name__)
 
-# 单卡只有一个执行位：接单即开跑，跑不动就让接口回 429，不排队、不重试。
+# 单卡只有一个执行位：consumer 抢到位才开跑，抢不到就让消息退回队列。不排队、不重试。
 _slot = threading.Lock()
 _current: str | None = None
 
@@ -43,28 +42,19 @@ def release(task_id: str) -> None:
             _current = None
 
 
-def spawn(task_id: str) -> None:
-    """占位成功后调用。HTTP 已经 202 返回，推理在后台线程里跑。"""
+def spawn(task: dict[str, Any]) -> None:
+    """占位成功后调用。推理在后台线程里跑完，终态写 S3 状态文件并发 webhook。"""
     thread = threading.Thread(
         target=_run_guarded,
-        args=(task_id,),
-        name=f"wan22-task-{task_id[:8]}",
+        args=(task,),
+        name=f"wan22-task-{task['id'][:8]}",
         daemon=True,
     )
     thread.start()
 
 
 def startup() -> None:
-    stale = store.fail_running("interrupted")
-    for task in stale:
-        logger.warning("fail interrupted task=%s process restarted", task["id"])
-    if stale:
-        threading.Thread(
-            target=_notify_all,
-            args=(stale,),
-            name="wan22-interrupted",
-            daemon=True,
-        ).start()
+    # 无情生成机器：没有本地留档，重启后上一单的事务全靠 SQS 重投恢复。
     if config.PRELOAD and not config.DRY_RUN:
         threading.Thread(target=_preload, name="wan22-preload", daemon=True).start()
 
@@ -76,40 +66,24 @@ def _preload() -> None:
         logger.exception("pipeline preload failed")
 
 
-def _notify_all(tasks: list[dict[str, Any]]) -> None:
-    for task in tasks:
-        # 重启判死的任务也要落状态文件，否则查询端会一直看到 generating。
-        status.write(task["id"], "failed", error=task.get("error"))
-        try:
-            webhook.notify(task)
-        except Exception:
-            logger.exception("webhook failed task=%s", task.get("id"))
-
-
-def _run_guarded(task_id: str) -> None:
-    outcome: dict[str, Any] | None = None
+def _run_guarded(task: dict[str, Any]) -> None:
+    task_id = task["id"]
+    outcome: dict[str, Any]
     try:
-        outcome = _run(task_id)
+        outcome = _run(task)
     except Exception:
         logger.exception("task crashed task=%s", task_id)
         outcome = {"status": "failed", "error": "generate_failed"}
     finally:
         # 显存搬回来、临时帧删完才放开执行位，否则下一单会撞上收尾中的卡。
         release(task_id)
-    if outcome:
-        _finish(task_id, outcome)
+    _finish(task, outcome)
 
 
-def _run(task_id: str) -> dict[str, Any] | None:
-    """跑完一条流水线，返回终态。落库和 webhook 由调用方在释放执行位后做。"""
-    task = store.get_task(task_id)
-    if not task:
-        logger.warning("missing task=%s", task_id)
-        return None
-
+def _run(task: dict[str, Any]) -> dict[str, Any]:
+    """跑完一条流水线，返回终态。状态文件和 webhook 由 _finish 统一写。"""
+    task_id = task["id"]
     output = str(config.OUTPUT_DIR / f"{task_id}.mp4")
-    first_path = task.get("first_frame_path")
-    last_path = task.get("last_frame_path")
     started = time.monotonic()
     logger.info(
         "running task=%s duration=%s resolution=%s steps=%s audio=%s",
@@ -119,9 +93,11 @@ def _run(task_id: str) -> dict[str, Any] | None:
         task.get("steps"),
         bool(task.get("audio")),
     )
+    first_path: str | None = None
+    last_path: str | None = None
     try:
         first_path = _ensure_image(task, "first")
-        last_path = _ensure_image(task, "last") if task.get("last_image_url") else last_path
+        last_path = _ensure_image(task, "last") if task.get("last_image_url") else None
         generate_s = foley_s = upscale_s = upload_s = 0.0
         foley_ok = 0
         upscale_ok = 0
@@ -280,23 +256,15 @@ def _run(task_id: str) -> dict[str, Any] | None:
 
 
 def _ensure_image(task: dict, kind: str) -> str:
-    path_key = "first_frame_path" if kind == "first" else "last_frame_path"
     url_key = "image_url" if kind == "first" else "last_image_url"
-    path = task.get(path_key)
-    if path and Path(path).is_file():
-        return path
     url = task.get(url_key)
     if not url:
         raise UrlError("missing image")
     local = Path(url)
     if local.is_file():
-        resolved = str(local.resolve())
-        store.update_task(task["id"], **{path_key: resolved})
-        return resolved
+        return str(local.resolve())
     logger.info("download task=%s kind=%s url=%s", task["id"], kind, url)
-    saved = download.download_image(url, config.UPLOAD_DIR / f"{task['id']}_{kind}")
-    store.update_task(task["id"], **{path_key: saved})
-    return saved
+    return download.download_image(url, config.UPLOAD_DIR / f"{task['id']}_{kind}")
 
 
 def _log_timing(
@@ -349,19 +317,13 @@ def _log_timing(
     logger.info("timing %s", " ".join(fields))
 
 
-def _finish(task_id: str, outcome: dict[str, Any]) -> None:
-    """落终态 → 写状态文件 → 回调 Java。失败不重投，短码直接给出去。
+def _finish(task: dict[str, Any], outcome: dict[str, Any]) -> None:
+    """写 S3 终态 → 回调 Java。失败不重投，短码直接给出去。
 
     状态文件必须在 webhook 之前写：Java 在回调里立刻查 S3 也要能看到终态。
     """
+    task_id = task["id"]
     if outcome["status"] == "succeeded":
-        store.update_task(
-            task_id,
-            status="succeeded",
-            error=None,
-            seed=outcome.get("seed"),
-            video_url=outcome.get("video_url"),
-        )
         status.write(
             task_id,
             "succeeded",
@@ -370,12 +332,12 @@ def _finish(task_id: str, outcome: dict[str, Any]) -> None:
         )
     else:
         error = outcome.get("error") or "generate_failed"
-        store.update_task(task_id, status="failed", error=error, video_url=None)
         status.write(task_id, "failed", error=error)
         logger.warning("failed task=%s error=%s", task_id, error)
-    task = store.get_task(task_id)
-    if task:
-        webhook.notify(task)
+    try:
+        webhook.notify({**task, **outcome})
+    except Exception:
+        logger.exception("webhook failed task=%s", task_id)
 
 
 def _cleanup_frames(task: dict, *paths: str | None) -> None:

@@ -83,8 +83,7 @@ SQS_MAX_RECEIVE = int(os.environ.get("SQS_MAX_RECEIVE", "5"))
 # 执行位被 HTTP POST 占住时消息退回队列的冷却秒数。
 SQS_BUSY_BACKOFF = int(os.environ.get("SQS_BUSY_BACKOFF", "30"))
 
-# 任务留档。没有队列，SQLite 只记录跑过什么、结果是什么，方便后期查。
-TASK_DB = _abs(Path(os.environ.get("WAN22_TASK_DB", ROOT / "tasks.db")), ROOT)
+# 无本地留档：任务状态只在 S3 状态文件里。WORKER_ID 进状态文件做溯源。
 WORKER_ID = os.environ.get("WAN22_WORKER_ID") or socket.gethostname()
 UPLOAD_MAX_BYTES = int(os.environ.get("WAN22_UPLOAD_MAX_BYTES", str(10 * 1024 * 1024)))
 ENABLE_DOCS = os.environ.get("WAN22_DOCS", "0") == "1"
