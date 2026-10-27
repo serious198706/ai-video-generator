@@ -134,10 +134,51 @@ if [[ "${WAN22_SAGE_SKIP:-0}" != "1" ]]; then
     git clone --depth 1 "$SAGE_GIT_URL" "$SAGE_SRC" || true
   fi
   if [[ -d "$SAGE_SRC" ]]; then
-    echo "[wan22] building sageattention2++ from source"
+    # torch 是 cu128 编译的，系统 nvcc 可能是别的版本（如 13.2）；
+    # cpp_extension 会做版本一致性检查并拒绝编译。优先找和 torch 匹配的 toolkit，
+    # 找不到且是 root 就用 runfile 补装一个（--toolkit 只写 /usr/local/cuda-<ver>，
+    # 不碰驱动、不改 /usr/local/cuda 软链；新驱动本来就向后兼容旧运行时）。
+    TORCH_CUDA="$(python -c 'import torch; print(torch.version.cuda)')"
+    SAGE_CUDA_HOME="${CUDA_HOME:-}"
+    _match_toolkit() {
+      [[ -x "$1/bin/nvcc" ]] && "$1/bin/nvcc" --version | grep -q "release $TORCH_CUDA"
+    }
+    if [[ -z "$SAGE_CUDA_HOME" ]]; then
+      for cand in /usr/local/cuda-"$TORCH_CUDA" /usr/local/cuda; do
+        if _match_toolkit "$cand"; then
+          SAGE_CUDA_HOME="$cand"
+          break
+        fi
+      done
+    fi
+    if [[ -z "$SAGE_CUDA_HOME" && "$(id -u)" == "0" && -n "$TORCH_CUDA" ]]; then
+      # 只对已知映射的版本自动补装（当前是 12.8）；其它版本留给人工处理。
+      if [[ "$TORCH_CUDA" == "12.8" && ! -x "/usr/local/cuda-12.8/bin/nvcc" ]]; then
+        echo "[wan22] no matching toolkit; installing CUDA 12.8 toolkit (root, runfile, no driver)"
+        CUDA_RUN="$(mktemp /tmp/cuda-toolkit.XXXXXX.run)"
+        if curl -L --fail --retry 3 -o "$CUDA_RUN" \
+          "https://developer.download.nvidia.com/compute/cuda/12.8.1/local_installers/cuda_12.8.1_570.124.06_linux.run"; then
+          sh "$CUDA_RUN" --silent --toolkit --override --no-man-page \
+            || echo "[wan22] cuda toolkit install failed" >&2
+          rm -f "$CUDA_RUN"
+        else
+          echo "[wan22] cuda runfile download failed" >&2
+          rm -f "$CUDA_RUN"
+        fi
+      fi
+      if _match_toolkit "/usr/local/cuda-${TORCH_CUDA}"; then
+        SAGE_CUDA_HOME="/usr/local/cuda-${TORCH_CUDA}"
+      fi
+    fi
+    if [[ -n "$SAGE_CUDA_HOME" ]]; then
+      echo "[wan22] building sageattention2++ with CUDA_HOME=$SAGE_CUDA_HOME (torch cu$TORCH_CUDA)"
+    else
+      echo "[wan22] no toolkit matching torch cu$TORCH_CUDA; trying default nvcc" >&2
+    fi
     # 官方推荐的并行编译参数；96 核机器大幅缩短编译时间。
     (cd "$SAGE_SRC" \
-      && EXT_PARALLEL=4 NVCC_APPEND_FLAGS="--threads 8" MAX_JOBS=32 python setup.py install) \
+      && CUDA_HOME="$SAGE_CUDA_HOME" EXT_PARALLEL=4 NVCC_APPEND_FLAGS="--threads 8" MAX_JOBS=32 \
+        python setup.py install) \
       || echo "[wan22] sageattn2 build failed; will fall back to sdpa" >&2
     if python -c "import sys; assert sys.version_info >= (3, 13)" 2>/dev/null; then
       echo "[wan22] python>=3.13: also building sageattn3 (blackwell fp4)"
