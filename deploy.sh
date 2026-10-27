@@ -121,23 +121,33 @@ python -c "import torch; assert torch.cuda.is_available(), 'torch.cuda.is_availa
 
 python -m pip install --upgrade -r "$SCRIPT_DIR/requirements.txt"
 
-# SageAttention：Wan 官方推荐的 SDPA 替换。装不上不影响启动，运行时自动回退 SDPA。
-# sa3 需要 python>=3.13 + 源码编译；venv 是 3.12 时只装 sa2++（sm80+ 全兼容）。
+# SageAttention：Wan 官方推荐的 SDPA 替换。2++/3 都不发 PyPI（PyPI 只有无效的 1.0.x），
+# 一律源码编译。sa3 需要 python>=3.13；3.12 只装 sa2++（sm80+ 全兼容）。
+# 编译失败不影响启动，运行时自动回退 SDPA。
 if [[ "${WAN22_SAGE_SKIP:-0}" != "1" ]]; then
-  echo "[wan22] installing sageattention"
-  python -m pip install --upgrade sageattention \
-    || echo "[wan22] sageattention install failed; will fall back to sdpa" >&2
-  if python -c "import sys; assert sys.version_info >= (3, 13)" 2>/dev/null; then
-    echo "[wan22] python>=3.13: trying sageattn3 (blackwell fp4)"
-    if [[ ! -d "$SCRIPT_DIR/.cache/SageAttention" ]]; then
-      git clone --depth 1 https://github.com/thu-ml/SageAttention.git \
-        "$SCRIPT_DIR/.cache/SageAttention" || true
+  SAGE_SRC="$SCRIPT_DIR/.cache/SageAttention"
+  SAGE_GIT_URL="https://github.com/thu-ml/SageAttention.git"
+  if [[ -n "${WAN22_GITHUB_MIRROR:-}" ]]; then
+    SAGE_GIT_URL="${WAN22_GITHUB_MIRROR}thu-ml/SageAttention.git"
+  fi
+  if [[ ! -d "$SAGE_SRC" ]]; then
+    git clone --depth 1 "$SAGE_GIT_URL" "$SAGE_SRC" || true
+  fi
+  if [[ -d "$SAGE_SRC" ]]; then
+    echo "[wan22] building sageattention2++ from source"
+    # 官方推荐的并行编译参数；96 核机器大幅缩短编译时间。
+    (cd "$SAGE_SRC" \
+      && EXT_PARALLEL=4 NVCC_APPEND_FLAGS="--threads 8" MAX_JOBS=32 python setup.py install) \
+      || echo "[wan22] sageattn2 build failed; will fall back to sdpa" >&2
+    if python -c "import sys; assert sys.version_info >= (3, 13)" 2>/dev/null; then
+      echo "[wan22] python>=3.13: also building sageattn3 (blackwell fp4)"
+      if [[ -d "$SAGE_SRC/sageattention3_blackwell" ]]; then
+        (cd "$SAGE_SRC/sageattention3_blackwell" && python setup.py install) \
+          || echo "[wan22] sageattn3 build failed; keep sa2++" >&2
+      fi
     fi
-    if [[ -d "$SCRIPT_DIR/.cache/SageAttention/sageattention3_blackwell" ]]; then
-      (cd "$SCRIPT_DIR/.cache/SageAttention/sageattention3_blackwell" \
-        && python setup.py install) \
-        || echo "[wan22] sageattn3 build failed; keep sa2++" >&2
-    fi
+  else
+    echo "[wan22] SageAttention clone failed; will fall back to sdpa" >&2
   fi
 fi
 

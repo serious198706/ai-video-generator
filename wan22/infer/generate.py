@@ -301,29 +301,74 @@ def _place_pipe(pipe) -> None:
 
 
 def _apply_sage() -> bool:
-    """把 SDPA 换成 SageAttention（官方对 Wan 的推荐用法：猴子补丁 F.sdpa）。
+    """把 SDPA 换成 SageAttention（官方对 Wan 的用法：替换 F.sdpa）。
 
-    sageattn 2++：pip 直装，Wan2.2 官方支持，sm80+ 全兼容。
-    sageattn3（Blackwell FP4）要求 python>=3.13 + 源码编译，装得上就优先用。
-    失败只记日志并回退 SDPA，不让服务起不来。
+    sa2++ 源码编译安装（PyPI 只有无效的 1.0.x）；core.py 的 sageattn 自动按
+    架构分发，sm120（Blackwell）走 qk_int8/pv_fp8 CUDA 内核。
+    直接赋值全局 F.sdpa 会把 T5 文本编码器等 fp32/eager 调用也拦下来，
+    core.py 里全是硬 assert——所以包一层：只对 bf16/fp16、无 mask、
+    head_dim<=128 的调用走 sage，其余原样回落 torch 原生 SDPA。
     """
     global _sage_on
     if not config.SAGE_ENABLE:
         return False
     try:
+        import torch
         import torch.nn.functional as F
+
+        original_sdpa = F.scaled_dot_product_attention
+        if getattr(original_sdpa, "_wan22_sage", False):
+            return True  # 已替换过（reload 场景）
 
         try:
             from sageattn3 import sageattn3_blackwell as sage_fn  # type: ignore
 
             variant = "sageattn3"
         except ImportError:
-            from sageattention import sageattn as sage_fn  # type: ignore
+            import sageattention
+            from importlib.metadata import PackageNotFoundError, version as pkg_version
 
-            variant = "sageattn2"
-        F.scaled_dot_product_attention = sage_fn
+            try:
+                installed = pkg_version("sageattention")
+            except PackageNotFoundError:
+                installed = str(getattr(sageattention, "__version__", "0"))
+            major = installed.split(".")[0]
+            if not major.isdigit() or int(major) < 2:
+                logger.warning(
+                    "sageattention %s is the legacy pypi build, need >=2 (source build), skip",
+                    installed,
+                )
+                return False
+            sage_fn = sageattention.sageattn
+            variant = f"sageattn2({installed})"
+
+        def _sage_or_sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, **kwargs):
+            # 只把 DiT 的无 mask bf16 attention 交给 sage；T5 等 fp32/eager/带 mask
+            # 的调用原样走原生 SDPA（sageattn core 对这些形态是硬 assert）。
+            eligible = (
+                query.is_cuda
+                and query.dtype in (torch.float16, torch.bfloat16)
+                and key.dtype == query.dtype
+                and value.dtype == query.dtype
+                and attn_mask is None
+                and not is_causal
+                and dropout_p == 0.0
+                and query.size(-1) <= 128
+            )
+            if eligible:
+                try:
+                    return sage_fn(query, key, value, is_causal=False, **kwargs)
+                except Exception:
+                    logger.exception("sageattn call failed, falling back to sdpa once")
+            return original_sdpa(
+                query, key, value,
+                attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal, **kwargs
+            )
+
+        _sage_or_sdpa._wan22_sage = True  # type: ignore[attr-defined]
+        F.scaled_dot_product_attention = _sage_or_sdpa
         _sage_on = True
-        logger.info("sage attention enabled: %s", variant)
+        logger.info("sage attention enabled: %s (guarded, falls back to sdpa)", variant)
         return True
     except Exception:
         logger.exception("sage attention unavailable, falling back to sdpa")
