@@ -51,6 +51,8 @@ TEXT_ENCODER_QUANT = os.environ.get("WAN22_TEXT_ENCODER_QUANT", "int8wo").lower(
 VAE_TILING = os.environ.get("WAN22_VAE_TILING", "1") == "1"
 # 仅 1080p：auto 在 >=90 GiB GPU 上保留双 expert；on/off 可强制测试/回退。
 EXPERT_RESIDENCY_1080P = os.environ.get("WAN22_1080P_EXPERT_RESIDENCY", "auto").lower()
+QUANT_1080P = os.environ.get("WAN22_1080P_QUANT", "auto").lower()
+UPSCALE_KEEP_WAN_1080P = os.environ.get("WAN22_1080P_UPSCALE_KEEP_WAN", "auto").lower()
 
 NUM_STEPS = int(os.environ.get("WAN22_STEPS", "6"))
 GUIDANCE_SCALE = float(os.environ.get("WAN22_GUIDANCE_SCALE", "1.0"))

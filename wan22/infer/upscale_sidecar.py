@@ -34,6 +34,12 @@ def _reply(payload: dict) -> None:
     _JSON_OUT.flush()
 
 
+def _error_type(exc: Exception) -> str:
+    import torch
+
+    return "cuda_oom" if isinstance(exc, torch.cuda.OutOfMemoryError) else "runtime"
+
+
 def even(value: int) -> int:
     value = max(2, int(value))
     return value - (value % 2)
@@ -240,7 +246,7 @@ def main() -> int:
         _log(f"load failed: {exc}")
         traceback.print_exc(file=sys.stderr)
         try:
-            _reply({"ok": False, "ready": False, "error": str(exc)})
+            _reply({"ok": False, "ready": False, "error": str(exc), "error_type": _error_type(exc)})
         except Exception:
             pass
         os._exit(1)
@@ -273,7 +279,7 @@ def main() -> int:
             _reply({"ok": True, **stats})
         except Exception as exc:
             traceback.print_exc(file=sys.stderr)
-            _reply({"ok": False, "error": str(exc)})
+            _reply({"ok": False, "error": str(exc), "error_type": _error_type(exc)})
     return 0
 
 

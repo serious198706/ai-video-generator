@@ -141,6 +141,10 @@ def _check_model_metadata() -> None:
 
 
 def _validate_config() -> None:
+    if config.QUANT_1080P not in {"auto", "baseline", "float8dq"}:
+        raise ValueError("WAN22_1080P_QUANT must be auto, baseline or float8dq")
+    if config.UPSCALE_KEEP_WAN_1080P not in {"auto", "on", "off"}:
+        raise ValueError("WAN22_1080P_UPSCALE_KEEP_WAN must be auto, on or off")
     if config.EXPERT_RESIDENCY_1080P not in {"auto", "on", "off"}:
         raise ValueError("WAN22_1080P_EXPERT_RESIDENCY must be auto, on or off")
     if config.OFFLOAD not in {"model", "sequential", "none"}:
@@ -432,6 +436,94 @@ def load_pipe():
             raise
 
 
+def _use_fp8_1080p(resolution: str | None) -> bool:
+    if (resolution or "").lower() != "1080p" or config.QUANT_1080P == "baseline":
+        return False
+    if config.OFFLOAD != "none":
+        if config.QUANT_1080P == "float8dq":
+            raise ValueError("1080p float8dq requires WAN22_OFFLOAD=none")
+        return False
+    import torch
+
+    supported = torch.cuda.get_device_capability(0) >= (8, 9)
+    if config.QUANT_1080P == "float8dq":
+        if not supported:
+            raise ValueError("1080p float8dq requires NVIDIA compute capability >=8.9")
+        return True
+    return supported and torch.cuda.get_device_properties(0).total_memory >= 90 * 1024**3
+
+
+def _select_transformers(pipe, resolution: str | None) -> str:
+    """仅切换 expert；基线保留在 CPU，不能在 INT8 权重上再次量化。单任务执行位保护调用。"""
+    import torch
+
+    use_fp8 = _use_fp8_1080p(resolution)
+    desired = "1080p-float8dq" if use_fp8 else "baseline"
+    if not hasattr(pipe, "_wan22_expert_cache"):
+        pipe._wan22_expert_cache = {"baseline": (pipe.transformer, pipe.transformer_2)}
+        pipe._wan22_expert_mode = "baseline"
+    previous_mode = pipe._wan22_expert_mode
+    if previous_mode == desired:
+        return "float8dq" if use_fp8 else config.QUANT
+
+    started = time.perf_counter()
+    previous = pipe._wan22_expert_cache[previous_mode]
+    creating = desired not in pipe._wan22_expert_cache
+    for expert in previous:
+        expert.to("cpu")
+    torch.cuda.empty_cache()
+    try:
+        if desired not in pipe._wan22_expert_cache:
+            from torchao.quantization import Float8DynamicActivationFloat8WeightConfig, quantize_
+            from torchao.quantization.granularity import PerRow
+
+            logger.info("1080p preparing separate FP8 experts (first use only; baseline cached on CPU)")
+            pipe.transformer = _load_transformer("transformer")
+            pipe.transformer_2 = _load_transformer("transformer_2")
+            _fuse_nsfw_loras(pipe)
+            for expert in (pipe.transformer, pipe.transformer_2):
+                expert.to("cuda")
+                quantize_(expert, Float8DynamicActivationFloat8WeightConfig(granularity=PerRow()))
+            pipe._wan22_expert_cache[desired] = (pipe.transformer, pipe.transformer_2)
+        selected = pipe._wan22_expert_cache[desired]
+        pipe.transformer, pipe.transformer_2 = selected
+        for expert in selected:
+            expert.to("cuda")
+    except Exception:
+        # 丢弃未完成的 pair，保证后续基线请求仍可使用原来的权重。
+        for expert in (pipe.transformer, pipe.transformer_2):
+            expert.to("cpu")
+        pipe.transformer, pipe.transformer_2 = previous
+        if creating:
+            pipe._wan22_expert_cache.pop(desired, None)
+        torch.cuda.empty_cache()
+        for expert in previous:
+            expert.to("cuda")
+        raise
+    pipe._wan22_expert_mode = desired
+    torch.cuda.synchronize()
+    logger.info("expert mode=%s switch_s=%.3f", desired, time.perf_counter() - started)
+    return "float8dq" if use_fp8 else config.QUANT
+
+
+def can_share_gpu_for_upscale(resolution: str | None) -> bool:
+    """只用于无 Foley 的 1080p；给超分进程至少留 16 GiB 实际空闲显存。"""
+    if (resolution or "").lower() != "1080p" or config.UPSCALE_KEEP_WAN_1080P == "off":
+        return False
+    if config.OFFLOAD != "none":
+        return False
+    import torch
+
+    if config.UPSCALE_KEEP_WAN_1080P == "auto" and torch.cuda.get_device_properties(0).total_memory < 90 * 1024**3:
+        return False
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+    free, _ = torch.cuda.mem_get_info()
+    shared = free >= 16 * 1024**3
+    logger.info("1080p upscale GPU sharing=%s free_gib=%.2f required_free_gib=16", int(shared), free / 1024**3)
+    return shared
+
+
 def pause_gpu() -> None:
     """把 Wan pipeline 挪到 CPU，把显存让给超分 / Foley。"""
     import torch
@@ -439,10 +531,11 @@ def pause_gpu() -> None:
     with _pipe_lock:
         if _pipe is None:
             return
+        started = time.perf_counter()
         _log_memory("wan pause gpu")
         _pipe.to("cpu")
         torch.cuda.empty_cache()
-        _log_memory("wan on cpu")
+        _log_memory(f"wan on cpu transfer_s={time.perf_counter() - started:.3f}")
 
 
 def resume_gpu() -> None:
@@ -450,9 +543,13 @@ def resume_gpu() -> None:
     with _pipe_lock:
         if _pipe is None:
             return
+        started = time.perf_counter()
         _log_memory("wan resume gpu")
         _pipe.to("cuda")
-        _log_memory("wan on cuda")
+        import torch
+
+        torch.cuda.synchronize()
+        _log_memory(f"wan on cuda transfer_s={time.perf_counter() - started:.3f}")
 
 
 def _boundary_timestep(pipe):
@@ -703,6 +800,9 @@ def generate_video(
     from wan22.media.image import open_rgb
 
     pipe = load_pipe()
+    quant_started = time.perf_counter()
+    transformer_quant = _select_transformers(pipe, resolution)
+    quant_select_s = time.perf_counter() - quant_started
     min_dim, max_dim, square_dim = generate_dims(resolution)
     image = _resize_for_wan(
         open_rgb(first_frame_path),
@@ -779,8 +879,8 @@ def generate_video(
     )
     if is_1080p:
         logger.info(
-            "1080p generation resident=%s stage_s=%.3f restore_s=%.3f export_s=%.3f seed=%s",
-            int(resident), stage_s, restore_s, time.perf_counter() - export_started, used_seed,
+            "1080p generation quant=%s quant_select_s=%.3f resident=%s stage_s=%.3f restore_s=%.3f export_s=%.3f seed=%s",
+            transformer_quant, quant_select_s, int(resident), stage_s, restore_s, time.perf_counter() - export_started, used_seed,
         )
     return used_seed
 

@@ -22,6 +22,10 @@ class UpscaleError(RuntimeError):
     pass
 
 
+class UpscaleOutOfMemory(UpscaleError):
+    pass
+
+
 def even(value: int) -> int:
     value = max(2, int(value))
     return value - (value % 2)
@@ -165,6 +169,8 @@ def _ensure() -> None:
     ready = _readline(timeout=max(config.UPSCALE_TIMEOUT, 300))
     if not ready.get("ok") or not ready.get("ready"):
         _kill()
+        if ready.get("error_type") == "cuda_oom":
+            raise UpscaleOutOfMemory(f"sidecar not ready: {ready}")
         raise UpscaleError(f"sidecar not ready: {ready}")
     logger.info("upscale sidecar ready")
 
@@ -173,6 +179,8 @@ def _request(payload: dict) -> dict:
     _write(payload)
     reply = _readline(timeout=config.UPSCALE_TIMEOUT)
     if not reply.get("ok"):
+        if reply.get("error_type") == "cuda_oom":
+            raise UpscaleOutOfMemory(reply.get("error") or "upscale CUDA OOM")
         raise UpscaleError(reply.get("error") or "upscale generate failed")
     return reply
 

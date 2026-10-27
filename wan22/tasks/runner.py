@@ -9,7 +9,7 @@ from typing import Any
 from wan22 import config
 from wan22.infer import generate
 from wan22.infer.foley import FoleyError, add_audio
-from wan22.infer.upscale import UpscaleError, upscale_video
+from wan22.infer.upscale import UpscaleError, UpscaleOutOfMemory, stop as stop_upscale, upscale_video
 from wan22.log import get_logger
 from wan22.media import download, status, webhook
 from wan22.media.upload import upload_video
@@ -145,12 +145,27 @@ def _run(task: dict[str, Any]) -> dict[str, Any]:
         needs_upscale = (task.get("resolution") or "").lower() == "1080p" and not config.DRY_RUN
         needs_foley = config.FOLEY_ENABLE and not config.DRY_RUN and bool(task.get("audio"))
         if needs_upscale or needs_foley:
-            generate.pause_gpu()
+            shared_gpu = needs_upscale and not needs_foley and generate.can_share_gpu_for_upscale(task.get("resolution"))
+            paused = False
+            if not shared_gpu:
+                generate.pause_gpu()
+                paused = True
+            else:
+                logger.info("1080p keep Wan on GPU during upscale task=%s", task_id)
             try:
                 if needs_upscale:
                     upscale_t = time.monotonic()
                     try:
-                        upscale_video(output)
+                        try:
+                            upscale_video(output)
+                        except UpscaleOutOfMemory:
+                            if not shared_gpu:
+                                raise
+                            logger.warning("1080p shared upscale CUDA OOM; retry with Wan on CPU task=%s", task_id)
+                            stop_upscale()
+                            generate.pause_gpu()
+                            paused = True
+                            upscale_video(output)
                         upscale_ok = 1
                     except UpscaleError:
                         logger.exception("upscale failed task=%s", task_id)
@@ -192,7 +207,11 @@ def _run(task: dict[str, Any]) -> dict[str, Any]:
                         )
                         return {"status": "failed", "error": "foley_failed"}
             finally:
-                generate.resume_gpu()
+                if shared_gpu:
+                    # 释放 sidecar 的 CUDA context，避免影响下一条 480p/720p 的显存。
+                    stop_upscale()
+                if paused:
+                    generate.resume_gpu()
 
         upload_t = time.monotonic()
         if config.DRY_RUN:

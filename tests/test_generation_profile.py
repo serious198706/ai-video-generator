@@ -20,6 +20,8 @@ class GenerationProfileTests(unittest.TestCase):
     def setUp(self):
         self.torch = Mock()
         self.torch.cuda.get_device_properties.return_value.total_memory = 96 * 1024**3
+        self.torch.cuda.get_device_capability.return_value = (12, 0)
+        self.torch.cuda.mem_get_info.return_value = (40 * 1024**3, 96 * 1024**3)
         self.torch.cuda.max_memory_allocated.return_value = 30 * 1024**3
         self.torch.cuda.max_memory_reserved.return_value = 40 * 1024**3
         self.modules = patch.dict(sys.modules, {"torch": self.torch})
@@ -116,6 +118,7 @@ class GenerationProfileTests(unittest.TestCase):
             stack.enter_context(patch.object(config, "DRY_RUN", False))
             stack.enter_context(patch.object(config, "EXPERT_RESIDENCY_1080P", "auto"))
             stack.enter_context(patch.object(config, "OFFLOAD", "none"))
+            stack.enter_context(patch.object(config, "QUANT_1080P", "baseline"))
             stack.enter_context(patch.dict(sys.modules, {"diffusers.utils": SimpleNamespace(export_to_video=export)}))
             stack.enter_context(patch.object(generate, "load_pipe", return_value=pipe))
             stack.enter_context(patch("wan22.media.image.open_rgb", return_value=image))
@@ -135,6 +138,68 @@ class GenerationProfileTests(unittest.TestCase):
         for request in pipe.calls:
             self.assertEqual(request["num_inference_steps"], 4)
             self.assertEqual(request["num_frames"], 237)
+
+    def test_fp8_policy_keeps_other_resolutions_and_small_cards_on_baseline(self):
+        with patch.object(config, "QUANT_1080P", "auto"), patch.object(config, "OFFLOAD", "none"):
+            self.assertTrue(generate._use_fp8_1080p("1080p"))
+            for resolution in (None, "480p", "720p"):
+                self.assertFalse(generate._use_fp8_1080p(resolution))
+            self.torch.cuda.get_device_properties.return_value.total_memory = 48 * 1024**3
+            self.assertFalse(generate._use_fp8_1080p("1080p"))
+            self.torch.cuda.get_device_capability.return_value = (8, 0)
+            self.assertFalse(generate._use_fp8_1080p("1080p"))
+
+    def test_fp8_cache_restores_original_experts_without_requantizing(self):
+        baseline = (Mock(), Mock())
+        fp8 = (Mock(), Mock())
+        pipe = SimpleNamespace(transformer=baseline[0], transformer_2=baseline[1])
+        quantize = Mock()
+        fake_ao = SimpleNamespace(Float8DynamicActivationFloat8WeightConfig=Mock(), quantize_=quantize)
+        with (
+            patch.object(config, "QUANT_1080P", "auto"),
+            patch.object(config, "OFFLOAD", "none"),
+            patch.object(generate, "_load_transformer", side_effect=fp8) as load,
+            patch.object(generate, "_fuse_nsfw_loras") as fuse,
+            patch.dict(sys.modules, {"torchao.quantization": fake_ao, "torchao.quantization.granularity": SimpleNamespace(PerRow=Mock())}),
+        ):
+            generate._select_transformers(pipe, "1080p")
+            self.assertIs(pipe.transformer, fp8[0])
+            self.assertEqual(load.call_count, 2)
+            fuse.assert_called_once_with(pipe)
+            self.assertEqual([call.args[0] for call in quantize.call_args_list], list(fp8))
+            generate._select_transformers(pipe, "1080p")
+            self.assertEqual(load.call_count, 2)
+            generate._select_transformers(pipe, "480p")
+            self.assertIs(pipe.transformer, baseline[0])
+            self.assertIs(pipe.transformer_2, baseline[1])
+            generate._select_transformers(pipe, "1080p")
+            self.assertIs(pipe.transformer, fp8[0])
+            self.assertEqual(load.call_count, 2)
+            self.assertEqual(quantize.call_count, 2)
+
+    def test_failed_fp8_build_restores_baseline_pair(self):
+        baseline = (Mock(), Mock())
+        pipe = SimpleNamespace(transformer=baseline[0], transformer_2=baseline[1])
+        fake_ao = SimpleNamespace(Float8DynamicActivationFloat8WeightConfig=Mock(), quantize_=Mock(side_effect=RuntimeError("unsupported kernel")))
+        with (
+            patch.object(generate, "_use_fp8_1080p", return_value=True),
+            patch.object(generate, "_load_transformer", side_effect=[Mock(), Mock()]),
+            patch.object(generate, "_fuse_nsfw_loras"),
+            patch.dict(sys.modules, {"torchao.quantization": fake_ao, "torchao.quantization.granularity": SimpleNamespace(PerRow=Mock())}),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "unsupported kernel"):
+                generate._select_transformers(pipe, "1080p")
+        self.assertIs(pipe.transformer, baseline[0])
+        self.assertIs(pipe.transformer_2, baseline[1])
+        self.assertEqual(pipe._wan22_expert_mode, "baseline")
+        self.assertEqual(set(pipe._wan22_expert_cache), {"baseline"})
+
+    def test_sharing_requires_real_free_memory_and_only_affects_1080p(self):
+        with patch.object(config, "UPSCALE_KEEP_WAN_1080P", "auto"), patch.object(config, "OFFLOAD", "none"):
+            self.assertTrue(generate.can_share_gpu_for_upscale("1080p"))
+            self.assertFalse(generate.can_share_gpu_for_upscale("720p"))
+            self.torch.cuda.mem_get_info.return_value = (8 * 1024**3, 96 * 1024**3)
+            self.assertFalse(generate.can_share_gpu_for_upscale("1080p"))
 
 
 if __name__ == "__main__":

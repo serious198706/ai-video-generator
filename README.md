@@ -58,6 +58,14 @@ vast.ai 上如果 `nvcc --version` 是 13.2，而 `python -c 'import torch; prin
 
 每次 1080p 生成会输出 `1080p profile`：`prompt_s` 为文本编码，`latent_prepare_s` 包含输入图像 VAE 编码，`denoise_s` 为两个 expert 前向计算累计耗时，`vae_decode_s` 为视频 VAE 解码；同时输出 GPU 峰值 allocated/reserved GiB。`1080p generation` 记录 expert 准备、生成后模型恢复、视频导出耗时。计时使用 CUDA 同步，可能引入少量测量开销；阶段日志不含所有调度开销，不要求相加等于 runner 的 `generate_s`。`denoise_s` 不包含步间 expert 搬运。对比时固定图片、提示词、seed、时长和 steps，并比较预热后的请求。
 
+1080p 去噪与搬运优化（VAE 配置不变）：
+
+- `WAN22_1080P_QUANT=auto`（默认）：在至少 90 GiB、compute capability >=8.9、`WAN22_OFFLOAD=none` 的 NVIDIA GPU 上启用独立 FP8 动态量化 expert，使用 TorchAO `Float8DynamicActivationFloat8WeightConfig(granularity=PerRow())`。RTX PRO 6000 Blackwell 96GB + torch 2.11/cu128 + torchao 0.18 是本次目标测试环境，仍需服务器验证速度和画质。可设 `float8dq` 强制测试；`baseline` 恢复 `WAN22_QUANT`。
+- FP8 pair 从原始 BF16 权重重新加载并融合相同 LoRA，不从 INT8 权重二次量化。文本编码器、VAE 和普通分辨率的原始 expert 不改。FP8 与基线 expert 分别缓存，未使用的一组停在 CPU；需要额外主机内存。首次 1080p 包含加载/量化成本，日志 `expert mode=1080p-float8dq switch_s=...` 和 `quant_select_s` 可区分冷启动；连续 1080p 复用 FP8 pair。切回 480p/720p 会搬回原始 expert，因此切换分辨率的第一单有额外搬运时间，但量化配置和推理参数仍保持原设置。
+- `WAN22_1080P_UPSCALE_KEEP_WAN=auto`（默认）：仅无 Foley 的 1080p、至少 90 GiB GPU，在释放 PyTorch 空闲缓存后剩余显存至少 16 GiB 时，超分期间让 Wan 留在 GPU。`on` 可在较小 GPU 上测试（仍需至少 16 GiB 实际空闲），`off` 恢复搬运。若超分进程明确报告 CUDA OOM，则终止进程、把 Wan 搬到 CPU，并仅重试超分一次；其他错误不自动重试。共享模式收尾会终止超分进程，避免它的 CUDA context 占用下一单显存。带 Foley 的任务保留原搬运流程。
+
+测试时在 `.env` 中设置上述变量并重启 worker，无需重新运行 `deploy.sh`。先连续跑两次同参数 1080p，以第二次的 `denoise_s`、`generate_s`、`total_s` 与已记录的 445.676 / 552.732 / 777.020 秒对比，并抽帧核对画质。FP8 兼容性或画质不合适时，设 `WAN22_1080P_QUANT=baseline` 重启；若只想恢复超分搬运，设 `WAN22_1080P_UPSCALE_KEEP_WAN=off`。本轮不改帧数、采样步数、画布、VAE 精度/tiling 或超分模型。
+
 干净 Ubuntu 26.04（裸金属，没有 DLAMI）先做系统层，再走上面的 `deploy.sh`：
 
 ```bash
