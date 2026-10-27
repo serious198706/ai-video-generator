@@ -85,17 +85,19 @@ class SqsConsumerTests(unittest.TestCase):
             "audio": True,
         }
         with patch("wan22.tasks.sqs_consumer.assert_image_source", side_effect=_fake_https):
-            task_id, request, error = sqs_consumer._parse(json.dumps(body))
+            task_id, request, error, data = sqs_consumer._parse(json.dumps(body))
         self.assertIsNone(error)
         self.assertEqual(task_id, "t1")
         self.assertEqual(request.image, "https://cdn.example.com/a.jpg")
         self.assertTrue(request.audio)
+        self.assertEqual(data, body)  # 原始消息体透传，终态回写用
 
     def test_parse_rejects_bad_body(self) -> None:
-        _, _, error = sqs_consumer._parse("not json")
+        _, _, error, data = sqs_consumer._parse("not json")
+        self.assertIsNone(data)
         self.assertEqual(error, "body is not json")
         with patch("wan22.tasks.sqs_consumer.assert_image_source", side_effect=_fake_https):
-            _, _, error = sqs_consumer._parse(json.dumps({"task_id": "t", "image_url": "x"}))
+            _, _, error, data = sqs_consumer._parse(json.dumps({"task_id": "t", "image_url": "x"}))
         self.assertIsNotNone(error)
 
     def test_handle_runs_task_and_deletes_message(self) -> None:
@@ -124,14 +126,19 @@ class SqsConsumerTests(unittest.TestCase):
         self.assertEqual(written, ["pending", "generating", "succeeded"])
         self.assertEqual(sqs.delete_message.call_args.kwargs["ReceiptHandle"], "r1")
 
-        # 终态带计时与基本参数
+        # 终态：request 原文回传 + timing 子对象带计时
         final = self.mock_write.call_args
         self.assertEqual(final.args[1], "succeeded")
         fields = final.kwargs
-        for key in ("seed", "video_url", "started_at", "finished_at", "duration_s",
+        self.assertEqual(fields["request"]["task_id"], task_id)
+        self.assertEqual(fields["request"]["image_url"], "https://cdn.example.com/a.jpg")
+        timing = fields["timing"]
+        for key in ("started_at", "finished_at", "duration_s",
                     "generate_s", "upscale_s", "foley_s", "upload_s"):
-            self.assertIn(key, fields, f"missing {key} in succeeded status")
-        self.assertIsInstance(fields["duration_s"], float)
+            self.assertIn(key, timing, f"missing {key} in timing")
+        self.assertIsInstance(timing["duration_s"], float)
+        self.assertIsNotNone(fields["seed"])
+        self.assertTrue(fields["video_url"])
 
     def test_handle_duplicate_terminal_deletes(self) -> None:
         task_id = uuid.uuid4().hex
@@ -176,7 +183,10 @@ class SqsConsumerTests(unittest.TestCase):
             patch("wan22.tasks.sqs_consumer.assert_image_source", side_effect=_fake_https),
         ):
             sqs_consumer._handle(message)
-        self.mock_write.assert_called_once_with(task_id, "failed", error="poisoned")
+        call = self.mock_write.call_args
+        self.assertEqual(call.args[1], "failed")
+        self.assertEqual(call.kwargs["error"], "poisoned")
+        self.assertEqual(call.kwargs["request"]["task_id"], task_id)
         sqs.delete_message.assert_called_once()
 
 

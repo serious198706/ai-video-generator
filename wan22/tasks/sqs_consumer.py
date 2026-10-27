@@ -94,13 +94,13 @@ def _handle(message: dict[str, Any]) -> None:
     receipt = message["ReceiptHandle"]
     body_raw = message.get("Body") or ""
     receive_count = int((message.get("Attributes") or {}).get("ApproximateReceiveCount") or "1")
-    task_id, request, error = _parse(body_raw)
+    task_id, request, error, data = _parse(body_raw)
 
     if error is not None:
         # lambda 侧已按同一套规则校验过；走到这里基本是坏消息，到次数就判死删除。
         if receive_count >= config.SQS_MAX_RECEIVE:
             if task_id:
-                _fail_and_delete(task_id, receipt, error)
+                _fail_and_delete(task_id, receipt, error, data)
             else:
                 logger.error("drop poison message after %s receives: %s", receive_count, error)
                 _delete(receipt)
@@ -112,7 +112,7 @@ def _handle(message: dict[str, Any]) -> None:
     assert task_id is not None and request is not None
     if receive_count >= config.SQS_MAX_RECEIVE:
         logger.error("task=%s hit max receive %s, fail and delete", task_id, receive_count)
-        _fail_and_delete(task_id, receipt, "poisoned")
+        _fail_and_delete(task_id, receipt, "poisoned", data)
         return
 
     # 幂等：重复投递时 S3 状态文件已有终态就删消息；进行中/不存在则继续走。
@@ -128,13 +128,15 @@ def _handle(message: dict[str, Any]) -> None:
         return
 
     task = _build_task(task_id, request)
+    # lambda 入队时已把这份 dict 写成状态文件里的 request；终态原样带回，不丢格式。
+    task["request"] = data
     logger.info("dequeued task=%s receive=%s", task_id, receive_count)
-    # 状态文件带上入参，事后能直接看出这台机器收到了什么。
+    # request 用消息原文，与 lambda queued 文件里的完全一致。
     status.write(
         task_id,
         "pending",
         receive_count=receive_count,
-        request=request.model_dump(by_alias=True, exclude_none=True),
+        request=data,
     )
     runner.spawn(task)
     threading.Thread(
@@ -145,14 +147,17 @@ def _handle(message: dict[str, Any]) -> None:
     ).start()
 
 
-def _parse(body_raw: str) -> tuple[str | None, GenerateRequest | None, str | None]:
-    """SQS body 是 lambda_api 的 JSON：task_id + image_url / webhook_url 等蛇形字段。"""
+def _parse(body_raw: str) -> tuple[str | None, GenerateRequest | None, str | None, dict | None]:
+    """SQS body 是 lambda_api 的 JSON：task_id + image_url / webhook_url 等蛇形字段。
+
+    第四个返回值是原始 dict（即 lambda 写进 queued 状态文件的 request），原样透传。
+    """
     try:
         data = json.loads(body_raw)
     except (TypeError, ValueError):
-        return None, None, "body is not json"
+        return None, None, "body is not json", None
     if not isinstance(data, dict):
-        return None, None, "body is not an object"
+        return None, None, "body is not an object", None
     task_id = str(data.get("task_id") or "").strip() or None
     try:
         request = GenerateRequest(
@@ -169,20 +174,20 @@ def _parse(body_raw: str) -> tuple[str | None, GenerateRequest | None, str | Non
             audio=bool(data.get("audio")),
         )
     except ValueError as exc:
-        return task_id, None, f"invalid fields: {exc}"
+        return task_id, None, f"invalid fields: {exc}", data
     try:
         assert_image_source(request.image, config.IMAGE_HOSTS, kind="image")
         if request.last_image:
             assert_image_source(request.last_image, config.IMAGE_HOSTS, kind="image")
     except UrlError as exc:
-        return task_id, None, f"image url rejected: {exc}"
+        return task_id, None, f"image url rejected: {exc}", data
     if (
         (request.resolution or "").lower() == "1080p"
         and not config.DRY_RUN
         and not config.UPSCALE_ENABLE
     ):
-        return task_id, None, "1080p requires upscale"
-    return task_id, request, None
+        return task_id, None, "1080p requires upscale", data
+    return task_id, request, None, data
 
 
 def _build_task(task_id: str, request: GenerateRequest) -> dict[str, Any]:
@@ -203,10 +208,13 @@ def _build_task(task_id: str, request: GenerateRequest) -> dict[str, Any]:
     }
 
 
-def _fail_and_delete(task_id: str, receipt: str, error: str) -> None:
+def _fail_and_delete(task_id: str, receipt: str, error: str, data: dict | None) -> None:
     """坏消息也要让 Java 收到一次失败：写 S3 failed（带短码）+ webhook + 删消息。"""
     logger.error("failing task=%s error=%s", task_id, error)
-    status.write(task_id, "failed", error=error)
+    fields = {"error": error}
+    if data is not None:
+        fields["request"] = data
+    status.write(task_id, "failed", **fields)
     webhook.notify({"id": task_id, "error": error, "status": "failed"})
     _delete(receipt)
 

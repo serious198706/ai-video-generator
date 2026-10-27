@@ -83,11 +83,11 @@ def _run_guarded(task: dict[str, Any]) -> None:
     finally:
         # 显存搬回来、临时帧删完才放开执行位，否则下一单会撞上收尾中的卡。
         release(task_id)
-    if outcome["status"] != "succeeded":
-        # 失败也带时间：开跑/结束/总耗时。成功路径的计时在 _run 里更细。
-        outcome.setdefault("started_at", _now_iso())
-        outcome["finished_at"] = _now_iso()
-        outcome["duration_s"] = round(time.monotonic() - started, 3)
+    timing = outcome.pop("timing", {})
+    timing.setdefault("started_at", _now_iso())
+    timing["finished_at"] = _now_iso()
+    timing.setdefault("duration_s", round(time.monotonic() - started, 3))
+    outcome["timing"] = timing
     _finish(task, outcome)
 
 
@@ -115,14 +115,7 @@ def _run(task: dict[str, Any]) -> dict[str, Any]:
         upscale_ok = 0
         used_seed = task.get("seed")
         gen_started = time.monotonic()
-        status.write(
-            task_id,
-            "generating",
-            duration=task.get("duration"),
-            resolution=task.get("resolution"),
-            steps=task.get("steps"),
-            audio=bool(task.get("audio")),
-        )
+        status.write(task_id, "generating")
         try:
             used_seed = generate.generate_video(
                 prompt=task["prompt"],
@@ -251,14 +244,16 @@ def _run(task: dict[str, Any]) -> dict[str, Any]:
             "status": "succeeded",
             "seed": used_seed,
             "video_url": video_url,
-            # 计时与基本参数一起进状态文件，事后可查每单花在哪。
-            "started_at": started_at,
-            "finished_at": _now_iso(),
-            "duration_s": round(total_s, 3),
-            "generate_s": round(generate_s, 3),
-            "upscale_s": round(upscale_s, 3),
-            "foley_s": round(foley_s, 3),
-            "upload_s": round(upload_s, 3),
+            # 计时收进 timing 子对象，事后可查每单花在哪。
+            "timing": {
+                "started_at": started_at,
+                "finished_at": _now_iso(),
+                "duration_s": round(total_s, 3),
+                "generate_s": round(generate_s, 3),
+                "upscale_s": round(upscale_s, 3),
+                "foley_s": round(foley_s, 3),
+                "upload_s": round(upload_s, 3),
+            },
         }
     except UrlError:
         logger.exception(
@@ -345,18 +340,21 @@ def _finish(task: dict[str, Any], outcome: dict[str, Any]) -> None:
     """写 S3 终态 → 回调 Java。失败不重投，短码直接给出去。
 
     状态文件必须在 webhook 之前写：Java 在回调里立刻查 S3 也要能看到终态。
-    outcome 里的计时/参数字段由 status.write 原样带进状态文件。
+    task["request"]（lambda 入队 JSON 原样）和 outcome["timing"] 一起进状态文件，
+    保持 lambda 建档时的格式：request 字段不丢，计时收在 timing 里。
     """
     task_id = task["id"]
+    fields: dict[str, Any] = {"timing": outcome.get("timing", {})}
+    if task.get("request") is not None:
+        fields["request"] = task["request"]
     if outcome["status"] == "succeeded":
-        status.write(task_id, "succeeded", **{
-            k: v for k, v in outcome.items() if k != "status"
-        })
+        fields["seed"] = outcome.get("seed")
+        fields["video_url"] = outcome.get("video_url")
+        status.write(task_id, "succeeded", **fields)
     else:
         error = outcome.get("error") or "generate_failed"
-        status.write(task_id, "failed", **{
-            k: v for k, v in outcome.items() if k not in ("status", "error")
-        }, error=error)
+        fields["error"] = error
+        status.write(task_id, "failed", **fields)
         logger.warning("failed task=%s error=%s", task_id, error)
     try:
         webhook.notify({**task, **outcome})
