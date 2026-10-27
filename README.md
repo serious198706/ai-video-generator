@@ -66,6 +66,8 @@ vast.ai 上如果 `nvcc --version` 是 13.2，而 `python -c 'import torch; prin
 
 测试时在 `.env` 中设置上述变量并重启 worker，无需重新运行 `deploy.sh`。先连续跑两次同参数 1080p，以第二次的 `denoise_s`、`generate_s`、`total_s` 与已记录的 445.676 / 552.732 / 777.020 秒对比，并抽帧核对画质。FP8 兼容性或画质不合适时，设 `WAN22_1080P_QUANT=baseline` 重启；若只想恢复超分搬运，设 `WAN22_1080P_UPSCALE_KEEP_WAN=off`。本轮不改帧数、采样步数、画布、VAE 精度/tiling 或超分模型。
 
+FP8 初始化时新 pair 先移到 GPU 融合 LoRA，融合后仅将参与量化的 Linear 归一化为 BF16，并跳过模型 `_keep_in_fp32_modules` 指定的层（如 `time_embedder`），避免原始 FP32 层或 PEFT 精度提升触发 `PerRow quantization only works for bfloat16 precision input weight`。日志分别记录 `fuse_s` 和 `quantize_s`。在 `auto` 模式下，若初始化仍失败，会恢复基线 expert 继续本次生成，并在当前进程中禁用后续 FP8 初始化尝试；重启后才重新尝试。强制 `float8dq` 模式仍保留报错，便于定位问题。此回退只覆盖 FP8 准备阶段，不覆盖后续去噪中的错误。
+
 干净 Ubuntu 26.04（裸金属，没有 DLAMI）先做系统层，再走上面的 `deploy.sh`：
 
 ```bash

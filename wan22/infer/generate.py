@@ -453,11 +453,28 @@ def _use_fp8_1080p(resolution: str | None) -> bool:
     return supported and torch.cuda.get_device_properties(0).total_memory >= 90 * 1024**3
 
 
+def _prepare_fp8_linears(expert):
+    """保留 Wan 的 FP32 例外层，仅归一化参与 FP8 的 Linear。返回同一量化过滤器。"""
+    import torch
+
+    keep_fp32 = set(getattr(expert, "_keep_in_fp32_modules", None) or [])
+
+    def eligible(module, fqn):
+        return isinstance(module, torch.nn.Linear) and not keep_fp32.intersection(fqn.split("."))
+
+    for name, module in expert.named_modules():
+        if eligible(module, name):
+            module.to(dtype=torch.bfloat16)
+    return eligible
+
+
 def _select_transformers(pipe, resolution: str | None) -> str:
     """仅切换 expert；基线保留在 CPU，不能在 INT8 权重上再次量化。单任务执行位保护调用。"""
     import torch
 
     use_fp8 = _use_fp8_1080p(resolution)
+    if config.QUANT_1080P == "auto" and getattr(pipe, "_wan22_fp8_disabled", False):
+        use_fp8 = False
     desired = "1080p-float8dq" if use_fp8 else "baseline"
     if not hasattr(pipe, "_wan22_expert_cache"):
         pipe._wan22_expert_cache = {"baseline": (pipe.transformer, pipe.transformer_2)}
@@ -480,10 +497,21 @@ def _select_transformers(pipe, resolution: str | None) -> str:
             logger.info("1080p preparing separate FP8 experts (first use only; baseline cached on CPU)")
             pipe.transformer = _load_transformer("transformer")
             pipe.transformer_2 = _load_transformer("transformer_2")
-            _fuse_nsfw_loras(pipe)
+            # 基线已在 CPU；新 pair 在 GPU 融合，避免大型 LoRA 矩阵乘法耗在 CPU 上。
+            fuse_started = time.perf_counter()
             for expert in (pipe.transformer, pipe.transformer_2):
                 expert.to("cuda")
-                quantize_(expert, Float8DynamicActivationFloat8WeightConfig(granularity=PerRow()))
+            _fuse_nsfw_loras(pipe)
+            torch.cuda.synchronize()
+            logger.info("1080p FP8 LoRA fusion on GPU fuse_s=%.3f", time.perf_counter() - fuse_started)
+            quantize_started = time.perf_counter()
+            for expert in (pipe.transformer, pipe.transformer_2):
+                # Wan 有刻意保留 FP32 的层，LoRA 也可能提升权重精度。
+                # 不能将整个 expert 强制 BF16；FP32 例外不参与 FP8。
+                eligible = _prepare_fp8_linears(expert)
+                quantize_(expert, Float8DynamicActivationFloat8WeightConfig(granularity=PerRow()), filter_fn=eligible)
+            torch.cuda.synchronize()
+            logger.info("1080p FP8 quantized from BF16 quantize_s=%.3f", time.perf_counter() - quantize_started)
             pipe._wan22_expert_cache[desired] = (pipe.transformer, pipe.transformer_2)
         selected = pipe._wan22_expert_cache[desired]
         pipe.transformer, pipe.transformer_2 = selected
@@ -499,6 +527,10 @@ def _select_transformers(pipe, resolution: str | None) -> str:
         torch.cuda.empty_cache()
         for expert in previous:
             expert.to("cuda")
+        if use_fp8 and config.QUANT_1080P == "auto":
+            pipe._wan22_fp8_disabled = True
+            logger.exception("1080p FP8 preparation failed; restored baseline, disable FP8 auto for this process")
+            return config.QUANT
         raise
     pipe._wan22_expert_mode = desired
     torch.cuda.synchronize()

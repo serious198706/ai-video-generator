@@ -159,6 +159,7 @@ class GenerationProfileTests(unittest.TestCase):
             patch.object(config, "QUANT_1080P", "auto"),
             patch.object(config, "OFFLOAD", "none"),
             patch.object(generate, "_load_transformer", side_effect=fp8) as load,
+            patch.object(generate, "_prepare_fp8_linears", return_value=lambda *_: True),
             patch.object(generate, "_fuse_nsfw_loras") as fuse,
             patch.dict(sys.modules, {"torchao.quantization": fake_ao, "torchao.quantization.granularity": SimpleNamespace(PerRow=Mock())}),
         ):
@@ -182,8 +183,10 @@ class GenerationProfileTests(unittest.TestCase):
         pipe = SimpleNamespace(transformer=baseline[0], transformer_2=baseline[1])
         fake_ao = SimpleNamespace(Float8DynamicActivationFloat8WeightConfig=Mock(), quantize_=Mock(side_effect=RuntimeError("unsupported kernel")))
         with (
+            patch.object(config, "QUANT_1080P", "float8dq"),
             patch.object(generate, "_use_fp8_1080p", return_value=True),
             patch.object(generate, "_load_transformer", side_effect=[Mock(), Mock()]),
+            patch.object(generate, "_prepare_fp8_linears", return_value=lambda *_: True),
             patch.object(generate, "_fuse_nsfw_loras"),
             patch.dict(sys.modules, {"torchao.quantization": fake_ao, "torchao.quantization.granularity": SimpleNamespace(PerRow=Mock())}),
         ):
@@ -194,12 +197,83 @@ class GenerationProfileTests(unittest.TestCase):
         self.assertEqual(pipe._wan22_expert_mode, "baseline")
         self.assertEqual(set(pipe._wan22_expert_cache), {"baseline"})
 
+    def test_auto_fp8_failure_continues_on_baseline_and_does_not_rebuild(self):
+        baseline = (Mock(), Mock())
+        pipe = SimpleNamespace(transformer=baseline[0], transformer_2=baseline[1])
+        fake_ao = SimpleNamespace(Float8DynamicActivationFloat8WeightConfig=Mock(), quantize_=Mock(side_effect=AssertionError("PerRow requires BF16")))
+        with (
+            patch.object(config, "QUANT_1080P", "auto"),
+            patch.object(generate, "_use_fp8_1080p", return_value=True),
+            patch.object(generate, "_load_transformer", side_effect=[Mock(), Mock()]) as load,
+            patch.object(generate, "_prepare_fp8_linears", return_value=lambda *_: True),
+            patch.object(generate, "_fuse_nsfw_loras"),
+            patch.dict(sys.modules, {"torchao.quantization": fake_ao, "torchao.quantization.granularity": SimpleNamespace(PerRow=Mock())}),
+        ):
+            self.assertEqual(generate._select_transformers(pipe, "1080p"), config.QUANT)
+            self.assertTrue(pipe._wan22_fp8_disabled)
+            self.assertEqual(generate._select_transformers(pipe, "1080p"), config.QUANT)
+            self.assertEqual(load.call_count, 2)
+        self.assertIs(pipe.transformer, baseline[0])
+        self.assertIs(pipe.transformer_2, baseline[1])
+        self.assertEqual(set(pipe._wan22_expert_cache), {"baseline"})
+
     def test_sharing_requires_real_free_memory_and_only_affects_1080p(self):
         with patch.object(config, "UPSCALE_KEEP_WAN_1080P", "auto"), patch.object(config, "OFFLOAD", "none"):
             self.assertTrue(generate.can_share_gpu_for_upscale("1080p"))
             self.assertFalse(generate.can_share_gpu_for_upscale("720p"))
             self.torch.cuda.mem_get_info.return_value = (8 * 1024**3, 96 * 1024**3)
             self.assertFalse(generate.can_share_gpu_for_upscale("1080p"))
+
+
+class Fp8DtypeRegressionTests(unittest.TestCase):
+    def test_lora_promoted_real_weights_are_bf16_before_perrow_quantization(self):
+        import torch
+
+        class CpuExpert(torch.nn.Module):
+            _keep_in_fp32_modules = ["time_embedder"]
+
+            def __init__(self):
+                super().__init__()
+                self.linear = torch.nn.Linear(8, 8, dtype=torch.bfloat16)
+                self.time_embedder = torch.nn.Linear(8, 8, dtype=torch.float32)
+
+            def to(self, *args, **kwargs):
+                # CPU 测试真实 tensor dtype；仅把设备迁移映射到 CPU。
+                if args and args[0] == "cuda":
+                    args = ("cpu", *args[1:])
+                if kwargs.get("device") == "cuda":
+                    kwargs["device"] = "cpu"
+                return super().to(*args, **kwargs)
+
+        baseline = (CpuExpert(), CpuExpert())
+        fp8 = (CpuExpert(), CpuExpert())
+        pipe = SimpleNamespace(transformer=baseline[0], transformer_2=baseline[1])
+
+        def fuse(target):
+            # 复现融合后 FP32 权重，而非从始至终使用不会检查 dtype 的 Mock。
+            target.transformer.linear.float()
+            target.transformer_2.linear.float()
+
+        def quantize(expert, _config, *, filter_fn):
+            self.assertEqual(expert.linear.weight.dtype, torch.bfloat16)
+            self.assertTrue(filter_fn(expert.linear, "linear"))
+            self.assertFalse(filter_fn(expert.time_embedder, "time_embedder"))
+            self.assertEqual(expert.time_embedder.weight.dtype, torch.float32)
+
+        fake_ao = SimpleNamespace(Float8DynamicActivationFloat8WeightConfig=Mock(), quantize_=Mock(side_effect=quantize))
+        with (
+            patch.object(config, "QUANT_1080P", "float8dq"),
+            patch.object(generate, "_use_fp8_1080p", return_value=True),
+            patch.object(generate, "_load_transformer", side_effect=fp8),
+            patch.object(generate, "_fuse_nsfw_loras", side_effect=fuse),
+            patch.object(torch.cuda, "synchronize"),
+            patch.object(torch.cuda, "empty_cache"),
+            patch.dict(sys.modules, {"torchao.quantization": fake_ao, "torchao.quantization.granularity": SimpleNamespace(PerRow=Mock())}),
+        ):
+            self.assertEqual(generate._select_transformers(pipe, "1080p"), "float8dq")
+        self.assertEqual(fake_ao.quantize_.call_count, 2)
+        self.assertIs(pipe.transformer, fp8[0])
+        self.assertEqual(baseline[0].linear.weight.dtype, torch.bfloat16)
 
 
 if __name__ == "__main__":
