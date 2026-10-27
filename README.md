@@ -50,6 +50,10 @@ cp .env.example .env
 
 `start.sh` 监听 `0.0.0.0:8000`，长时间跑请用 `screen`。第一次默认跳过 Foley。1080p 需要 compact 超分：`./deploy.sh` 默认会装（`WAN22_UPSCALE_SKIP=0`）。
 
+vast.ai 上如果 `nvcc --version` 是 13.2，而 `python -c 'import torch; print(torch.version.cuda)'` 是 12.8，SageAttention 扩展编译会因 CUDA 主版本不一致失败。PyTorch wheel 的 CUDA 运行库不等于系统 CUDA Toolkit；仅设置 `CUDA_HOME=/usr/local/cuda` 不能解决版本不一致。`deploy.sh` 会验证实际 nvcc 版本，优先使用匹配的 `CUDA_HOME` / `CUDA_PATH` 或 `/usr/local/cuda-12.8`；root 用户缺少 12.8 时会下载 NVIDIA runfile，仅补装 Toolkit，并恢复原有 `/usr/local/cuda` 软链。找到后，两套 SageAttention 扩展都使用该编译环境；找不到则跳过编译，保留 SDPA 回退。自动补装需要下载较大的安装包并预留磁盘空间。
+
+更新 GPU 机器上的脚本后重跑 `./deploy.sh` 即可。自定义安装位置可用 `CUDA_HOME=/path/to/cuda-12.8 ./deploy.sh`；只想跳过 SageAttention 安装可用 `WAN22_SAGE_SKIP=1 ./deploy.sh`（也可写进 `.env`）。
+
 干净 Ubuntu 26.04（裸金属，没有 DLAMI）先做系统层，再走上面的 `deploy.sh`：
 
 ```bash
