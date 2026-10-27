@@ -39,6 +39,10 @@ NSFW_LOW = os.environ.get(
 NSFW_HIGH_SCALE = float(os.environ.get("WAN22_NSFW_HIGH_SCALE", "1.0"))
 NSFW_LOW_SCALE = float(os.environ.get("WAN22_NSFW_LOW_SCALE", "1.0"))
 
+# SageAttention：替换 SDPA 的量化 attention。装了 sageattention/sageattn3 才生效，
+# 没装或加载失败自动回退 SDPA。Blackwell 上 sa2++ 即可有明显提速。
+SAGE_ENABLE = os.environ.get("WAN22_SAGE", "1") == "1"
+
 DRY_RUN = os.environ.get("WAN22_DRY_RUN", "0") == "1"
 PRELOAD = os.environ.get("WAN22_PRELOAD", "1") == "1"
 OFFLOAD = os.environ.get("WAN22_OFFLOAD", "none").lower()

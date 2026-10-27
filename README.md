@@ -2,7 +2,7 @@
 
 无情的生成机器：从 SQS 拉任务 → 生成 → 上传 S3 → 写状态文件 → webhook 回调 → 删消息。部署在 vast.ai 上，接单走 `lambda_api`（Lambda + SQS），本机不暴露任何生成接口。
 
-没有队列（进程内单执行位，忙时消息退回 SQS）、没有 Redis、没有 SQLite 留档。幂等靠 S3 状态文件，崩溃恢复靠 SQS 重投。推理是 WAMU Lightning I2V。480p 画布约 480×832；720p 约 720×1248；`1080p` 先按 720p 生成，再用 compact（realesr-general-x4v3）超到约 1080×1872。
+没有队列（进程内单执行位，忙时消息退回 SQS）、没有 Redis、没有 SQLite 留档。幂等靠 S3 状态文件，崩溃恢复靠 SQS 重投。推理是 WAMU Lightning I2V，attention 默认用 SageAttention 替换 SDPA（`WAN22_SAGE=1`，未安装自动回退 SDPA，timing 日志 `sage=1/0` 可查）。480p 画布约 480×832；720p 约 720×1248；`1080p` 先按 720p 生成，再用 compact（realesr-general-x4v3）超到约 1080×1872。
 
 ```
 server/

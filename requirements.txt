@@ -18,3 +18,6 @@ torchao>=0.9.0
 git+https://github.com/huggingface/diffusers
 # torch / torchvision 请按机器 CUDA 单独安装，例如：
 # pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+
+# 可选：SageAttention SDPA 替换，Wan2.2 官方支持。装不上运行时回退 SDPA。
+sageattention>=2.2.0

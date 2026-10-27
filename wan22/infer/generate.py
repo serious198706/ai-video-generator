@@ -14,6 +14,7 @@ from wan22.log import get_logger
 logger = get_logger(__name__)
 
 _pipe = None
+_sage_on = False
 _load_error: str | None = None
 _pipe_lock = threading.Lock()
 
@@ -299,6 +300,36 @@ def _place_pipe(pipe) -> None:
         pipe.to("cuda")
 
 
+def _apply_sage() -> bool:
+    """把 SDPA 换成 SageAttention（官方对 Wan 的推荐用法：猴子补丁 F.sdpa）。
+
+    sageattn 2++：pip 直装，Wan2.2 官方支持，sm80+ 全兼容。
+    sageattn3（Blackwell FP4）要求 python>=3.13 + 源码编译，装得上就优先用。
+    失败只记日志并回退 SDPA，不让服务起不来。
+    """
+    global _sage_on
+    if not config.SAGE_ENABLE:
+        return False
+    try:
+        import torch.nn.functional as F
+
+        try:
+            from sageattn3 import sageattn3_blackwell as sage_fn  # type: ignore
+
+            variant = "sageattn3"
+        except ImportError:
+            from sageattention import sageattn as sage_fn  # type: ignore
+
+            variant = "sageattn2"
+        F.scaled_dot_product_attention = sage_fn
+        _sage_on = True
+        logger.info("sage attention enabled: %s", variant)
+        return True
+    except Exception:
+        logger.exception("sage attention unavailable, falling back to sdpa")
+        return False
+
+
 def _build_pipe():
     import torch
     from diffusers import AutoencoderKLWan, WanImageToVideoPipeline
@@ -330,6 +361,7 @@ def _build_pipe():
 
     _fuse_nsfw_loras(pipe)
     _quantize_pipe(pipe)
+    _apply_sage()
     _place_pipe(pipe)
     _log_memory("pipeline ready")
     return pipe

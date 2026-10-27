@@ -121,6 +121,26 @@ python -c "import torch; assert torch.cuda.is_available(), 'torch.cuda.is_availa
 
 python -m pip install --upgrade -r "$SCRIPT_DIR/requirements.txt"
 
+# SageAttention：Wan 官方推荐的 SDPA 替换。装不上不影响启动，运行时自动回退 SDPA。
+# sa3 需要 python>=3.13 + 源码编译；venv 是 3.12 时只装 sa2++（sm80+ 全兼容）。
+if [[ "${WAN22_SAGE_SKIP:-0}" != "1" ]]; then
+  echo "[wan22] installing sageattention"
+  python -m pip install --upgrade sageattention \
+    || echo "[wan22] sageattention install failed; will fall back to sdpa" >&2
+  if python -c "import sys; assert sys.version_info >= (3, 13)" 2>/dev/null; then
+    echo "[wan22] python>=3.13: trying sageattn3 (blackwell fp4)"
+    if [[ ! -d "$SCRIPT_DIR/.cache/SageAttention" ]]; then
+      git clone --depth 1 https://github.com/thu-ml/SageAttention.git \
+        "$SCRIPT_DIR/.cache/SageAttention" || true
+    fi
+    if [[ -d "$SCRIPT_DIR/.cache/SageAttention/sageattention3_blackwell" ]]; then
+      (cd "$SCRIPT_DIR/.cache/SageAttention/sageattention3_blackwell" \
+        && python setup.py install) \
+        || echo "[wan22] sageattn3 build failed; keep sa2++" >&2
+    fi
+  fi
+fi
+
 # AWS 凭证：vast.ai 没有 IAM Role，SQS 接单和 S3 上传都靠专用 IAM 用户的 key。
 # 交互式终端才会问；非交互（CI / 云-init）跳过，由环境变量直接注入。
 # 已配过就不再问，轮换用 ./setup-aws.sh --force。WAN22_AWS_SETUP=0 可完全跳过。
