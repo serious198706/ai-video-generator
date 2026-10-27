@@ -4,6 +4,8 @@ import inspect
 import json
 import secrets
 import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from PIL import Image
@@ -139,6 +141,8 @@ def _check_model_metadata() -> None:
 
 
 def _validate_config() -> None:
+    if config.EXPERT_RESIDENCY_1080P not in {"auto", "on", "off"}:
+        raise ValueError("WAN22_1080P_EXPERT_RESIDENCY must be auto, on or off")
     if config.OFFLOAD not in {"model", "sequential", "none"}:
         raise ValueError("WAN22_OFFLOAD must be model, sequential or none")
     if config.FOLEY_SIZE not in {"xl", "xxl"}:
@@ -473,13 +477,80 @@ def _place_experts(pipe, timestep, boundary) -> str:
     return active
 
 
-def _stage_experts(pipe, num_frames: int):
+def _resident_experts_1080p(resolution: str | None) -> bool:
+    if (resolution or "").lower() != "1080p" or config.OFFLOAD != "none":
+        return False
+    mode = config.EXPERT_RESIDENCY_1080P
+    if mode != "auto":
+        return mode == "on"
+    import torch
+
+    return torch.cuda.get_device_properties(0).total_memory >= 90 * 1024**3
+
+
+@contextmanager
+def _profile_1080p(pipe):
+    """仅本次请求计时；临时包装方法，并在成功/异常时恢复。各阶段互不嵌套。"""
+    import torch
+
+    stats = {}
+    patched = []
+    missing = object()
+
+    def wrap(owner, name, label):
+        original = getattr(owner, name)
+        previous = vars(owner).get(name, missing)
+
+        def timed(*args, **kwargs):
+            torch.cuda.synchronize()
+            started = time.perf_counter()
+            try:
+                return original(*args, **kwargs)
+            finally:
+                torch.cuda.synchronize()
+                stats[label] = stats.get(label, 0.0) + time.perf_counter() - started
+
+        setattr(owner, name, timed)
+        patched.append((owner, name, previous))
+
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    try:
+        wrap(pipe, "encode_prompt", "prompt_s")
+        # prepare_latents 包含首/尾图的 VAE 编码。
+        wrap(pipe, "prepare_latents", "latent_prepare_s")
+        wrap(pipe.vae, "decode", "vae_decode_s")
+        wrap(pipe.transformer, "forward", "denoise_s")
+        if getattr(pipe, "transformer_2", None) is not None:
+            wrap(pipe.transformer_2, "forward", "denoise_s")
+        yield stats
+    finally:
+        for owner, name, previous in reversed(patched):
+            if previous is missing:
+                delattr(owner, name)
+            else:
+                setattr(owner, name, previous)
+        logger.info(
+            "1080p profile %s peak_allocated_gib=%.2f peak_reserved_gib=%.2f",
+            " ".join(f"{key}={value:.3f}" for key, value in sorted(stats.items())),
+            torch.cuda.max_memory_allocated() / 1024**3,
+            torch.cuda.max_memory_reserved() / 1024**3,
+        )
+
+
+def _stage_experts(pipe, num_frames: int, *, resident: bool = False):
     """长视频激活显存大，高/低噪声 transformer 分时上卡。"""
     import gc
     import torch
 
     gc.collect()
     torch.cuda.empty_cache()
+    if resident:
+        pipe.transformer.to("cuda")
+        if getattr(pipe, "transformer_2", None) is not None:
+            pipe.transformer_2.to("cuda")
+        logger.info("1080p expert residency=on frames=%s (no ping-pong)", num_frames)
+        return None
     if num_frames <= 81 or getattr(pipe, "transformer_2", None) is None:
         return None
 
@@ -678,23 +749,39 @@ def generate_video(
     if last_image is not None:
         kwargs["last_image"] = last_image
 
-    on_step_end = _stage_experts(pipe, num_frames)
+    is_1080p = (resolution or "").lower() == "1080p"
+    stage_started = time.perf_counter()
+    resident = _resident_experts_1080p(resolution)
+    on_step_end = _stage_experts(pipe, num_frames, resident=resident)
+    stage_s = time.perf_counter() - stage_started
     if on_step_end is not None:
         kwargs["callback_on_step_end"] = on_step_end
     try:
-        frames = pipe(**kwargs).frames[0]
+        if is_1080p:
+            with _profile_1080p(pipe):
+                frames = pipe(**kwargs).frames[0]
+        else:
+            frames = pipe(**kwargs).frames[0]
     finally:
+        restore_started = time.perf_counter()
         if on_step_end is not None:
             try:
                 pipe.to("cuda")
             except Exception:
                 logger.exception("restore pipeline to cuda failed")
+        restore_s = time.perf_counter() - restore_started
+    export_started = time.perf_counter()
     export_to_video(
         frames,
         output_path,
         fps=config.FPS,
         quality=used_quality,
     )
+    if is_1080p:
+        logger.info(
+            "1080p generation resident=%s stage_s=%.3f restore_s=%.3f export_s=%.3f seed=%s",
+            int(resident), stage_s, restore_s, time.perf_counter() - export_started, used_seed,
+        )
     return used_seed
 
 

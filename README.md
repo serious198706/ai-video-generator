@@ -54,6 +54,10 @@ vast.ai 上如果 `nvcc --version` 是 13.2，而 `python -c 'import torch; prin
 
 更新 GPU 机器上的脚本后重跑 `./deploy.sh` 即可。自定义安装位置可用 `CUDA_HOME=/path/to/cuda-12.8 ./deploy.sh`；只想跳过 SageAttention 安装可用 `WAN22_SAGE_SKIP=1 ./deploy.sh`（也可写进 `.env`）。
 
+1080p 性能测试：`WAN22_1080P_EXPERT_RESIDENCY=auto`（默认）会在总显存至少 90 GiB 且 `WAN22_OFFLOAD=none` 时让两个 expert 在去噪期间同时驻留 GPU，取消长视频的分时搬运；480p、720p 及较小显存 GPU 仍走原策略。可在 `.env` 中设 `on` 强制开启或 `off` 恢复原策略，重启 worker 生效。容量判断不保证峰值一定能放下；如果遇到显存不足，设 `off` 回退。本轮保留现有量化、生成尺寸、帧数和步数。
+
+每次 1080p 生成会输出 `1080p profile`：`prompt_s` 为文本编码，`latent_prepare_s` 包含输入图像 VAE 编码，`denoise_s` 为两个 expert 前向计算累计耗时，`vae_decode_s` 为视频 VAE 解码；同时输出 GPU 峰值 allocated/reserved GiB。`1080p generation` 记录 expert 准备、生成后模型恢复、视频导出耗时。计时使用 CUDA 同步，可能引入少量测量开销；阶段日志不含所有调度开销，不要求相加等于 runner 的 `generate_s`。`denoise_s` 不包含步间 expert 搬运。对比时固定图片、提示词、seed、时长和 steps，并比较预热后的请求。
+
 干净 Ubuntu 26.04（裸金属，没有 DLAMI）先做系统层，再走上面的 `deploy.sh`：
 
 ```bash
