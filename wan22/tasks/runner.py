@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,10 @@ from wan22.media.upload import upload_video
 from wan22.net.urlguard import UrlError
 
 logger = get_logger(__name__)
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 # 单卡只有一个执行位：consumer 抢到位才开跑，抢不到就让消息退回队列。不排队、不重试。
 _slot = threading.Lock()
@@ -68,6 +73,7 @@ def _preload() -> None:
 
 def _run_guarded(task: dict[str, Any]) -> None:
     task_id = task["id"]
+    started = time.monotonic()
     outcome: dict[str, Any]
     try:
         outcome = _run(task)
@@ -77,6 +83,11 @@ def _run_guarded(task: dict[str, Any]) -> None:
     finally:
         # 显存搬回来、临时帧删完才放开执行位，否则下一单会撞上收尾中的卡。
         release(task_id)
+    if outcome["status"] != "succeeded":
+        # 失败也带时间：开跑/结束/总耗时。成功路径的计时在 _run 里更细。
+        outcome.setdefault("started_at", _now_iso())
+        outcome["finished_at"] = _now_iso()
+        outcome["duration_s"] = round(time.monotonic() - started, 3)
     _finish(task, outcome)
 
 
@@ -85,6 +96,7 @@ def _run(task: dict[str, Any]) -> dict[str, Any]:
     task_id = task["id"]
     output = str(config.OUTPUT_DIR / f"{task_id}.mp4")
     started = time.monotonic()
+    started_at = _now_iso()
     logger.info(
         "running task=%s duration=%s resolution=%s steps=%s audio=%s",
         task_id,
@@ -235,7 +247,19 @@ def _run(task: dict[str, Any]) -> dict[str, Any]:
             wall_s,
             video_url,
         )
-        return {"status": "succeeded", "seed": used_seed, "video_url": video_url}
+        return {
+            "status": "succeeded",
+            "seed": used_seed,
+            "video_url": video_url,
+            # 计时与基本参数一起进状态文件，事后可查每单花在哪。
+            "started_at": started_at,
+            "finished_at": _now_iso(),
+            "duration_s": round(total_s, 3),
+            "generate_s": round(generate_s, 3),
+            "upscale_s": round(upscale_s, 3),
+            "foley_s": round(foley_s, 3),
+            "upload_s": round(upload_s, 3),
+        }
     except UrlError:
         logger.exception(
             "download failed task=%s image=%s last=%s",
@@ -321,18 +345,18 @@ def _finish(task: dict[str, Any], outcome: dict[str, Any]) -> None:
     """写 S3 终态 → 回调 Java。失败不重投，短码直接给出去。
 
     状态文件必须在 webhook 之前写：Java 在回调里立刻查 S3 也要能看到终态。
+    outcome 里的计时/参数字段由 status.write 原样带进状态文件。
     """
     task_id = task["id"]
     if outcome["status"] == "succeeded":
-        status.write(
-            task_id,
-            "succeeded",
-            seed=outcome.get("seed"),
-            video_url=outcome.get("video_url"),
-        )
+        status.write(task_id, "succeeded", **{
+            k: v for k, v in outcome.items() if k != "status"
+        })
     else:
         error = outcome.get("error") or "generate_failed"
-        status.write(task_id, "failed", error=error)
+        status.write(task_id, "failed", **{
+            k: v for k, v in outcome.items() if k not in ("status", "error")
+        }, error=error)
         logger.warning("failed task=%s error=%s", task_id, error)
     try:
         webhook.notify({**task, **outcome})

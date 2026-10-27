@@ -124,6 +124,15 @@ class SqsConsumerTests(unittest.TestCase):
         self.assertEqual(written, ["pending", "generating", "succeeded"])
         self.assertEqual(sqs.delete_message.call_args.kwargs["ReceiptHandle"], "r1")
 
+        # 终态带计时与基本参数
+        final = self.mock_write.call_args
+        self.assertEqual(final.args[1], "succeeded")
+        fields = final.kwargs
+        for key in ("seed", "video_url", "started_at", "finished_at", "duration_s",
+                    "generate_s", "upscale_s", "foley_s", "upload_s"):
+            self.assertIn(key, fields, f"missing {key} in succeeded status")
+        self.assertIsInstance(fields["duration_s"], float)
+
     def test_handle_duplicate_terminal_deletes(self) -> None:
         task_id = uuid.uuid4().hex
         self.mock_is_terminal.return_value = True
