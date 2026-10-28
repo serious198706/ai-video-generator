@@ -32,7 +32,7 @@ source ./worker-env.sh
 source "$WAN22_VENV_DIR/bin/activate"
 
 # 换成自己的同一张图片和 UTF-8 提示词文件。先 5s 排兼容性，再测 15s。
-COMMON=(--image /path/input.jpg --prompt-file /path/prompt.txt
+COMMON=(--image /workspace/test1.jpg --prompt-file /workspace/prompt.txt
         --duration 5 --steps 6 --seed 42 --resolution 720p
         --warmup 1 --runs 1 --attention auto --quant int8wo)
 
