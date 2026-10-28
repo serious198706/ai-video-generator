@@ -28,6 +28,11 @@ class BenchmarkTests(unittest.TestCase):
             parsed = benchmark.arguments(args + ["--profile", "on"])
             self.assertEqual(parsed.warmup, 0)
             self.assertEqual(parsed.runs, 1)
+            parsed = benchmark.arguments(args + ["--block-profile", "--residency", "on"])
+            self.assertTrue(parsed.block_profile)
+            for incompatible in (["--profile", "on"], ["--compile", "default"], ["--resolution", "1080p"], ["--residency", "off"]):
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    benchmark.arguments(args + ["--block-profile", "--residency", "on"] + incompatible)
 
     def test_rejects_compile_with_instrumentation_or_offload(self):
         with tempfile.TemporaryDirectory() as directory:

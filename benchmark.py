@@ -36,12 +36,15 @@ def arguments(argv=None):
     parser.add_argument("--profile", choices=("on", "off"), default="off")
     parser.add_argument("--resize", choices=("cpu_lanczos", "gpu_bicubic"), default="cpu_lanczos")
     parser.add_argument("--compile", choices=("off", "default", "max-autotune"), default="off")
+    parser.add_argument("--block-profile", action="store_true", help="profile one real expert block then stop; no video, warmup or repeats")
     args = parser.parse_args(argv)
     if not 0 < args.duration <= 15 or not 1 <= args.steps <= 50 or not 1 <= args.quality <= 10:
         parser.error("duration must be (0,15], steps 1..50, quality 1..10")
     if args.warmup < 0 or args.runs < 1:
         parser.error("warmup must be nonnegative and runs must be positive")
-    if args.warmup == 0 and args.profile != "on":
+    if args.block_profile and (args.compile != "off" or args.profile != "off" or args.residency != "on" or args.resolution == "1080p"):
+        parser.error("block profiling requires --compile off --profile off --residency on and 480p/720p")
+    if args.warmup == 0 and args.profile != "on" and not args.block_profile:
         parser.error("zero warmup is for --profile on diagnostics only; speed comparisons require warmup")
     if args.compile != "off" and (args.attention != "sdpa" or args.profile != "off" or args.residency != "on" or args.resolution == "1080p"):
         parser.error("compile experiments require --attention sdpa --profile off --residency on and 480p/720p (no postprocess offload)")
@@ -159,7 +162,7 @@ def main(argv=None) -> int:
         if path is not None:
             settings[f"{name}_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
     report = {
-        "measurement_kind": "cold_diagnostic" if args.warmup == 0 else "warmed_benchmark",
+        "measurement_kind": "first_block_diagnostic" if args.block_profile else ("cold_diagnostic" if args.warmup == 0 else "warmed_benchmark"),
         "settings": settings, "versions": versions(), "gpu": torch.cuda.get_device_name(0),
         "gpu_total_gib": torch.cuda.get_device_properties(0).total_memory / 1024**3,
         "cuda": torch.version.cuda, "runs": [], "status": "running",
@@ -181,6 +184,26 @@ def main(argv=None) -> int:
         actual_backend = attention.snapshot()["backend"]
         if args.attention != "auto" and actual_backend != args.attention:
             raise RuntimeError(f"requested {args.attention} but loaded {actual_backend}; comparison aborted")
+        if args.block_profile:
+            from wan22.infer.block_profile import FirstBlockProfile
+
+            before = attention.snapshot()
+            started = time.perf_counter()
+            with FirstBlockProfile(pipe, args.output) as diagnostic:
+                generate.generate_video(
+                    prompt, str(args.output / "unused.mp4"), str(args.image),
+                    str(args.last_image) if args.last_image else None,
+                    args.duration, args.seed, args.steps, quality=args.quality, resolution=args.resolution,
+                )
+            report["diagnostic_s"] = time.perf_counter() - started
+            report["attention"] = attention.delta(before)
+            if args.attention in {"sage2", "sage3"} and report["attention"]["sage_calls"] == 0:
+                raise RuntimeError("no successful Sage calls in profiled block")
+            report["block_profile"] = "block-profile.json"
+            report["trace"] = "block-trace.json"
+            report["status"] = "succeeded"
+            print(f"Block diagnostic: {report_path}; no video generated")
+            return 0
         if args.compile != "off":
             for expert in (pipe.transformer, pipe.transformer_2):
                 expert.compile(mode=args.compile)

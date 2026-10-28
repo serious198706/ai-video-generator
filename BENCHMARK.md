@@ -62,6 +62,10 @@ python benchmark.py "${COMMON[@]}" --residency on  --output data/bench/resident-
 
 需要更稳定统计时 `--runs 3` 或更多，只比较预热后中位数，同时检查所有单次值。当前目录未包含任何 GPU 成绩，不预设提速百分比。
 
+## 首个 block 算子诊断
+
+完整 15 秒诊断过慢时，使用 `--block-profile --residency on`，仅执行首个实际专家 block 后停止，不生成视频。此模式不做预热/重复，要求 `--profile off --compile off` 和 480p/720p。完整命令、报告字段及 CausVid / LightX2V 方案评估见 [ACCELERATION.md](ACCELERATION.md)。
+
 ## 验收与回退
 
 - 检查总耗时，以及不同阶段是否把耗时转移到了搬运/后处理；生成报告只覆盖生成和可选超分，不含下载、Foley、上传和队列耗时。
