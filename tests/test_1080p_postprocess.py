@@ -30,6 +30,7 @@ class PostprocessGpuTests(unittest.TestCase):
             for owner, attr, label in (
                 (runner.generate, "pause_gpu", "pause"), (runner.generate, "resume_gpu", "resume"),
                 (runner, "upscale_video", "upscale"), (runner, "stop_upscale", "stop"),
+                (runner, "release_upscale_gpu", "offload"),
                 (runner, "add_audio", "foley"), (runner, "upload_video", "upload"),
             ):
                 mock = stack.enter_context(patch.object(owner, attr))
@@ -43,12 +44,12 @@ class PostprocessGpuTests(unittest.TestCase):
     def test_shared_upscale_skips_transfers_and_releases_sidecar(self):
         result, events, _ = self.run_task()
         self.assertEqual(result["status"], "succeeded")
-        self.assertEqual([call[0] for call in events.mock_calls], ["upscale", "stop", "upload"])
+        self.assertEqual([call[0] for call in events.mock_calls], ["upscale", "offload", "upload"])
 
     def test_shared_oom_retries_once_after_pausing_wan(self):
         result, events, _ = self.run_task(errors=[upscale.UpscaleOutOfMemory("OOM"), None])
         self.assertEqual(result["status"], "succeeded")
-        self.assertEqual([call[0] for call in events.mock_calls], ["upscale", "stop", "pause", "upscale", "stop", "resume", "upload"])
+        self.assertEqual([call[0] for call in events.mock_calls], ["upscale", "stop", "pause", "upscale", "offload", "resume", "upload"])
 
     def test_second_oom_fails_and_restores_wan_without_upload(self):
         result, events, _ = self.run_task(errors=[upscale.UpscaleOutOfMemory("OOM"), upscale.UpscaleOutOfMemory("OOM")])
@@ -62,18 +63,18 @@ class PostprocessGpuTests(unittest.TestCase):
         self.assertEqual(result["error"], "upscale_failed")
         events.upscale.assert_called_once()
         events.pause.assert_not_called()
-        events.stop.assert_called_once()
+        events.offload.assert_called_once()
 
     def test_low_memory_uses_original_transfer_path(self):
         result, events, _ = self.run_task(shared=False)
         self.assertEqual(result["status"], "succeeded")
-        self.assertEqual([call[0] for call in events.mock_calls], ["pause", "upscale", "resume", "upload"])
+        self.assertEqual([call[0] for call in events.mock_calls], ["pause", "upscale", "offload", "resume", "upload"])
 
     def test_foley_keeps_original_transfer_policy(self):
         result, events, share = self.run_task(audio=True)
         self.assertEqual(result["status"], "succeeded")
         share.assert_not_called()
-        self.assertEqual([call[0] for call in events.mock_calls], ["pause", "upscale", "foley", "resume", "upload"])
+        self.assertEqual([call[0] for call in events.mock_calls], ["pause", "upscale", "offload", "foley", "resume", "upload"])
 
     def test_720p_does_not_use_upscale_or_transfers(self):
         result, events, share = self.run_task(resolution="720p")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import math
 import secrets
 import threading
 import time
@@ -18,7 +19,7 @@ logger = get_logger(__name__)
 _pipe = None
 _sage_on = False
 _load_error: str | None = None
-_pipe_lock = threading.Lock()
+_pipe_lock = threading.RLock()
 
 _QUANT_PRESETS = {
     "int8wo": "Int8WeightOnlyConfig",
@@ -145,8 +146,16 @@ def _validate_config() -> None:
         raise ValueError("WAN22_1080P_QUANT must be auto, baseline or float8dq")
     if config.UPSCALE_KEEP_WAN_1080P not in {"auto", "on", "off"}:
         raise ValueError("WAN22_1080P_UPSCALE_KEEP_WAN must be auto, on or off")
-    if config.EXPERT_RESIDENCY_1080P not in {"auto", "on", "off"}:
-        raise ValueError("WAN22_1080P_EXPERT_RESIDENCY must be auto, on or off")
+    if config.EXPERT_RESIDENCY not in {"auto", "on", "off"}:
+        raise ValueError("WAN22_EXPERT_RESIDENCY must be auto, on or off")
+    if not math.isfinite(config.RESIDENT_HEADROOM_GIB) or config.RESIDENT_HEADROOM_GIB <= 0:
+        raise ValueError("WAN22_RESIDENT_HEADROOM_GIB must be finite and positive")
+    if config.PROFILE not in {"auto", "on", "off"}:
+        raise ValueError("WAN22_PROFILE must be auto, on or off")
+    if config.SAGE_BACKEND not in {"auto", "sdpa", "sage2", "sage3"}:
+        raise ValueError("WAN22_SAGE_BACKEND must be auto, sdpa, sage2 or sage3")
+    if config.UPSCALE_RESIZE not in {"cpu_lanczos", "gpu_bicubic"}:
+        raise ValueError("WAN22_UPSCALE_RESIZE must be cpu_lanczos or gpu_bicubic")
     if config.OFFLOAD not in {"model", "sequential", "none"}:
         raise ValueError("WAN22_OFFLOAD must be model, sequential or none")
     if config.FOLEY_SIZE not in {"xl", "xxl"}:
@@ -309,78 +318,11 @@ def _place_pipe(pipe) -> None:
 
 
 def _apply_sage() -> bool:
-    """把 SDPA 换成 SageAttention（官方对 Wan 的用法：替换 F.sdpa）。
+    from wan22.infer import attention
 
-    sa2++ 源码编译安装（PyPI 只有无效的 1.0.x）；core.py 的 sageattn 自动按
-    架构分发，sm120（Blackwell）走 qk_int8/pv_fp8 CUDA 内核。
-    直接赋值全局 F.sdpa 会把 T5 文本编码器等 fp32/eager 调用也拦下来，
-    core.py 里全是硬 assert——所以包一层：只对 bf16/fp16、无 mask、
-    head_dim<=128 的调用走 sage，其余原样回落 torch 原生 SDPA。
-    """
     global _sage_on
-    if not config.SAGE_ENABLE:
-        return False
-    try:
-        import torch
-        import torch.nn.functional as F
-
-        original_sdpa = F.scaled_dot_product_attention
-        if getattr(original_sdpa, "_wan22_sage", False):
-            return True  # 已替换过（reload 场景）
-
-        try:
-            from sageattn3 import sageattn3_blackwell as sage_fn  # type: ignore
-
-            variant = "sageattn3"
-        except ImportError:
-            import sageattention
-            from importlib.metadata import PackageNotFoundError, version as pkg_version
-
-            try:
-                installed = pkg_version("sageattention")
-            except PackageNotFoundError:
-                installed = str(getattr(sageattention, "__version__", "0"))
-            major = installed.split(".")[0]
-            if not major.isdigit() or int(major) < 2:
-                logger.warning(
-                    "sageattention %s is the legacy pypi build, need >=2 (source build), skip",
-                    installed,
-                )
-                return False
-            sage_fn = sageattention.sageattn
-            variant = f"sageattn2({installed})"
-
-        def _sage_or_sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, **kwargs):
-            # 只把 DiT 的无 mask bf16 attention 交给 sage；T5 等 fp32/eager/带 mask
-            # 的调用原样走原生 SDPA（sageattn core 对这些形态是硬 assert）。
-            eligible = (
-                query.is_cuda
-                and query.dtype in (torch.float16, torch.bfloat16)
-                and key.dtype == query.dtype
-                and value.dtype == query.dtype
-                and attn_mask is None
-                and not is_causal
-                and dropout_p == 0.0
-                and query.size(-1) <= 128
-            )
-            if eligible:
-                try:
-                    return sage_fn(query, key, value, is_causal=False, **kwargs)
-                except Exception:
-                    logger.exception("sageattn call failed, falling back to sdpa once")
-            return original_sdpa(
-                query, key, value,
-                attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal, **kwargs
-            )
-
-        _sage_or_sdpa._wan22_sage = True  # type: ignore[attr-defined]
-        F.scaled_dot_product_attention = _sage_or_sdpa
-        _sage_on = True
-        logger.info("sage attention enabled: %s (guarded, falls back to sdpa)", variant)
-        return True
-    except Exception:
-        logger.exception("sage attention unavailable, falling back to sdpa")
-        return False
+    _sage_on = attention.install(config.SAGE_ENABLE, config.SAGE_BACKEND)
+    return _sage_on
 
 
 def _prepare_initial_gpu(pipe) -> bool:
@@ -597,11 +539,28 @@ def resume_gpu() -> None:
             return
         started = time.perf_counter()
         _log_memory("wan resume gpu")
-        _pipe.to("cuda")
+        _restore_staged_pipe(_pipe)
         import torch
 
         torch.cuda.synchronize()
         _log_memory(f"wan on cuda transfer_s={time.perf_counter() - started:.3f}")
+
+
+def _restore_staged_pipe(pipe) -> None:
+    """A failed restore must not leave a half-resident pipeline marked ready."""
+    global _pipe, _load_error
+    try:
+        pipe.to("cuda")
+    except Exception as exc:
+        with _pipe_lock:
+            if _pipe is pipe:
+                _pipe = None
+                _load_error = f"pipeline restore failed: {exc}"
+        try:
+            pipe.to("cpu")
+        except Exception:
+            logger.exception("failed to release partially restored pipeline")
+        raise
 
 
 def _boundary_timestep(pipe):
@@ -618,27 +577,43 @@ def _place_experts(pipe, timestep, boundary) -> str:
     need_high = boundary is None or float(timestep) >= float(boundary)
     active = "transformer" if need_high else "transformer_2"
     idle = "transformer_2" if need_high else "transformer"
-    getattr(pipe, active).to("cuda")
     other = getattr(pipe, idle, None)
     if other is not None:
         other.to("cpu")
     torch.cuda.empty_cache()
+    getattr(pipe, active).to("cuda")
     return active
 
 
-def _resident_experts_1080p(resolution: str | None) -> bool:
-    if (resolution or "").lower() != "1080p" or config.OFFLOAD != "none":
+def _resident_experts(width: int, height: int, num_frames: int) -> bool:
+    """Use actual generation load, not the requested output resolution, for all jobs.
+
+    Auto assumes both experts have been restored by load_pipe / the previous job.
+    The configurable headroom is a conservative heuristic, not an OOM guarantee.
+    """
+    if config.OFFLOAD != "none":
         return False
-    mode = config.EXPERT_RESIDENCY_1080P
+    mode = config.EXPERT_RESIDENCY
     if mode != "auto":
         return mode == "on"
     import torch
 
-    return torch.cuda.get_device_properties(0).total_memory >= 90 * 1024**3
+    if torch.cuda.get_device_properties(0).total_memory < 90 * 1024**3:
+        return False
+    torch.cuda.empty_cache()
+    free, _ = torch.cuda.mem_get_info()
+    load = (width * height / (720 * 1248)) * (num_frames / 81)
+    required_gib = config.RESIDENT_HEADROOM_GIB * max(1.0, load)
+    resident = free / 1024**3 >= required_gib
+    logger.info(
+        "expert residency=%s canvas=%sx%s frames=%s free_gib=%.2f budget_gib=%.2f",
+        int(resident), width, height, num_frames, free / 1024**3, required_gib,
+    )
+    return resident
 
 
 @contextmanager
-def _profile_1080p(pipe):
+def _profile_generation(pipe):
     """仅本次请求计时；临时包装方法，并在成功/异常时恢复。各阶段互不嵌套。"""
     import torch
 
@@ -680,27 +655,27 @@ def _profile_1080p(pipe):
             else:
                 setattr(owner, name, previous)
         logger.info(
-            "1080p profile %s peak_allocated_gib=%.2f peak_reserved_gib=%.2f",
+            "generation profile %s peak_allocated_gib=%.2f peak_reserved_gib=%.2f",
             " ".join(f"{key}={value:.3f}" for key, value in sorted(stats.items())),
             torch.cuda.max_memory_allocated() / 1024**3,
             torch.cuda.max_memory_reserved() / 1024**3,
         )
+        stats["peak_allocated_gib"] = torch.cuda.max_memory_allocated() / 1024**3
+        stats["peak_reserved_gib"] = torch.cuda.max_memory_reserved() / 1024**3
 
 
 def _stage_experts(pipe, num_frames: int, *, resident: bool = False):
     """长视频激活显存大，高/低噪声 transformer 分时上卡。"""
-    import gc
-    import torch
-
-    gc.collect()
-    torch.cuda.empty_cache()
+    # Accelerate owns placement in offload modes; never mix manual .to() with hooks.
+    if config.OFFLOAD != "none":
+        return None
     if resident:
         pipe.transformer.to("cuda")
         if getattr(pipe, "transformer_2", None) is not None:
             pipe.transformer_2.to("cuda")
-        logger.info("1080p expert residency=on frames=%s (no ping-pong)", num_frames)
+        logger.info("expert residency=on frames=%s (no ping-pong)", num_frames)
         return None
-    if num_frames <= 81 or getattr(pipe, "transformer_2", None) is None:
+    if getattr(pipe, "transformer_2", None) is None:
         return None
 
     boundary = _boundary_timestep(pipe)
@@ -713,11 +688,15 @@ def _stage_experts(pipe, num_frames: int, *, resident: bool = False):
     )
 
     def _on_step_end(pipeline, step_index, timestep, callback_kwargs):
+        nonlocal active
         timesteps = pipeline.scheduler.timesteps
         nxt = step_index + 1
         if nxt < len(timesteps):
-            name = _place_experts(pipeline, timesteps[nxt], boundary)
-            logger.info("expert swap step=%s next=%s", step_index + 1, name)
+            need_high = boundary is None or float(timesteps[nxt]) >= boundary
+            name = "transformer" if need_high else "transformer_2"
+            if name != active:
+                active = _place_experts(pipeline, timesteps[nxt], boundary)
+                logger.info("expert swap step=%s next=%s", step_index + 1, active)
         return callback_kwargs
 
     return _on_step_end
@@ -840,6 +819,7 @@ def generate_video(
     negative_prompt: str | None = None,
     quality: int | None = None,
     resolution: str | None = None,
+    metrics: dict | None = None,
 ) -> int:
     """生成单个 MP4，返回实际使用的 seed。"""
     used_seed = int(seed) if seed is not None else secrets.randbelow(2**31)
@@ -866,6 +846,7 @@ def generate_video(
 
     import torch
     from diffusers.utils import export_to_video
+    from wan22.infer import attention
     from wan22.media.image import open_rgb
 
     pipe = load_pipe()
@@ -920,24 +901,26 @@ def generate_video(
 
     is_1080p = (resolution or "").lower() == "1080p"
     stage_started = time.perf_counter()
-    resident = _resident_experts_1080p(resolution)
-    on_step_end = _stage_experts(pipe, num_frames, resident=resident)
-    stage_s = time.perf_counter() - stage_started
-    if on_step_end is not None:
-        kwargs["callback_on_step_end"] = on_step_end
+    resident = _resident_experts(image.width, image.height, num_frames)
+    restore_needed = config.OFFLOAD == "none" and not resident
+    attention_before = attention.snapshot()
+    stats = {}
+    profile = config.PROFILE == "on" or (config.PROFILE == "auto" and is_1080p)
     try:
-        if is_1080p:
-            with _profile_1080p(pipe):
+        on_step_end = _stage_experts(pipe, num_frames, resident=resident)
+        stage_s = time.perf_counter() - stage_started
+        if on_step_end is not None:
+            kwargs["callback_on_step_end"] = on_step_end
+        if profile:
+            with _profile_generation(pipe) as stats:
                 frames = pipe(**kwargs).frames[0]
         else:
             frames = pipe(**kwargs).frames[0]
     finally:
+        attention_stats = attention.delta(attention_before)
         restore_started = time.perf_counter()
-        if on_step_end is not None:
-            try:
-                pipe.to("cuda")
-            except Exception:
-                logger.exception("restore pipeline to cuda failed")
+        if restore_needed:
+            _restore_staged_pipe(pipe)
         restore_s = time.perf_counter() - restore_started
     export_started = time.perf_counter()
     _validate_video_frames(frames)
@@ -947,11 +930,17 @@ def generate_video(
         fps=config.FPS,
         quality=used_quality,
     )
-    if is_1080p:
-        logger.info(
-            "1080p generation quant=%s quant_select_s=%.3f resident=%s stage_s=%.3f restore_s=%.3f export_s=%.3f seed=%s",
-            transformer_quant, quant_select_s, int(resident), stage_s, restore_s, time.perf_counter() - export_started, used_seed,
+    export_s = time.perf_counter() - export_started
+    if metrics is not None:
+        metrics.update(
+            **stats, attention=attention_stats, width=image.width, height=image.height,
+            num_frames=num_frames, resident=resident, quant=transformer_quant,
+            quant_select_s=quant_select_s, stage_s=stage_s, restore_s=restore_s, export_s=export_s,
         )
+    logger.info(
+        "generation resolution=%s quant=%s quant_select_s=%.3f resident=%s stage_s=%.3f restore_s=%.3f export_s=%.3f seed=%s",
+        resolution or "480p", transformer_quant, quant_select_s, int(resident), stage_s, restore_s, export_s, used_seed,
+    )
     return used_seed
 
 

@@ -113,6 +113,7 @@ def _write_rgb_mp4(path: str | Path, frames, fps: float, crf: int = 16) -> None:
                     raise RuntimeError(f"odd size {width}x{height}, yuv420p needs even")
                 cmd = [
                     _ffmpeg_exe(),
+                    "-loglevel", "error",
                     "-y",
                     "-f",
                     "rawvideo",
@@ -157,8 +158,13 @@ def _write_rgb_mp4(path: str | Path, frames, fps: float, crf: int = 16) -> None:
             tail = "\n".join(err.strip().splitlines()[-12:])
             raise RuntimeError(f"ffmpeg failed code={code}: {tail}")
     finally:
-        if writer is not None and writer.poll() is None:
-            writer.kill()
+        if writer is not None:
+            if writer.poll() is None:
+                writer.kill()
+                writer.wait()
+            for stream in (writer.stdin, writer.stdout, writer.stderr):
+                if stream is not None:
+                    stream.close()
 
 
 def _install_extra_arches() -> None:
@@ -187,30 +193,37 @@ def _load_model(path: Path):
     return desc
 
 
-def _sr_frame(desc, rgb: np.ndarray) -> np.ndarray:
+def _sr_frame(desc, rgb: np.ndarray, *, size: tuple[int, int] | None = None) -> np.ndarray:
     import torch
+    import torch.nn.functional as functional
 
     device = next(desc.model.parameters()).device
     dtype = next(desc.model.parameters()).dtype
-    tensor = torch.from_numpy(rgb).permute(2, 0, 1).contiguous().float().div_(255)
-    tensor = tensor.unsqueeze(0).to(device=device, dtype=dtype)
+    # Transfer uint8 input; normalize on the target device.
+    tensor = torch.from_numpy(rgb).permute(2, 0, 1).contiguous().unsqueeze(0)
+    tensor = tensor.to(device=device).to(dtype=dtype).div_(255)
     out = desc(tensor)
-    out = out.float().clamp(0, 1).squeeze(0).permute(1, 2, 0).cpu().numpy()
-    return (out * 255.0).round().astype(np.uint8)
+    out = out.float().clamp(0, 1)
+    if size is not None and out.shape[-2:] != (size[1], size[0]):
+        # Opt-in: bicubic + antialias is not identical to the legacy CPU Lanczos.
+        out = functional.interpolate(out, size=(size[1], size[0]), mode="bicubic", align_corners=False, antialias=True)
+    out = out.clamp(0, 1).mul(255).round().to(torch.uint8)
+    return out.squeeze(0).permute(1, 2, 0).contiguous().cpu().numpy()
 
 
-def _run(desc, video: Path, output: Path, scale: float) -> dict:
+def _run(desc, video: Path, output: Path, scale: float, resize: str = "cpu_lanczos") -> dict:
     import cv2
     import torch
 
     width, height, fps, frames = _probe(video)
     tw, th = target_size(width, height, scale)
+    desc.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
     _log(f"compact {width}x{height} frames={frames} fps={fps:.3f} -> {tw}x{th}")
 
     def _frames():
         count = 0
         for rgb in _iter_rgb(video):
-            sr = _sr_frame(desc, rgb)
+            sr = _sr_frame(desc, rgb, size=(tw, th) if resize == "gpu_bicubic" else None)
             if sr.shape[1] != tw or sr.shape[0] != th:
                 sr = cv2.resize(sr, (tw, th), interpolation=cv2.INTER_LANCZOS4)
             count += 1
@@ -267,6 +280,16 @@ def main() -> int:
             if cmd == "ping":
                 _reply({"ok": True, "pong": True})
                 continue
+            if cmd == "offload":
+                # Keep imports and CPU weights warm, release GPU before Wan/Foley resume.
+                import torch
+
+                desc.to(torch.device("cpu"))
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
+                _reply({"ok": True, "device": "cpu"})
+                continue
             if cmd != "generate":
                 _reply({"ok": False, "error": f"unknown cmd {cmd!r}"})
                 continue
@@ -275,7 +298,10 @@ def main() -> int:
             output = Path(req["output"]).expanduser().resolve()
             job_scale = float(req.get("scale") or scale)
             output.unlink(missing_ok=True)
-            stats = _run(desc, video, output, job_scale)
+            resize = req.get("resize", "cpu_lanczos")
+            if resize not in {"cpu_lanczos", "gpu_bicubic"}:
+                raise ValueError(f"unsupported resize mode: {resize}")
+            stats = _run(desc, video, output, job_scale, resize)
             _reply({"ok": True, **stats})
         except Exception as exc:
             traceback.print_exc(file=sys.stderr)

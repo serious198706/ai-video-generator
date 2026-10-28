@@ -42,6 +42,8 @@ NSFW_LOW_SCALE = float(os.environ.get("WAN22_NSFW_LOW_SCALE", "1.0"))
 # SageAttention：替换 SDPA 的量化 attention。装了 sageattention/sageattn3 才生效，
 # 没装或加载失败自动回退 SDPA。Blackwell 上 sa2++ 即可有明显提速。
 SAGE_ENABLE = os.environ.get("WAN22_SAGE", "1") == "1"
+# auto 保留原先 Sage3 -> Sage2 -> SDPA 的选择顺序；可显式做后端对照。
+SAGE_BACKEND = os.environ.get("WAN22_SAGE_BACKEND", "auto").lower()
 
 DRY_RUN = os.environ.get("WAN22_DRY_RUN", "0") == "1"
 PRELOAD = os.environ.get("WAN22_PRELOAD", "1") == "1"
@@ -49,8 +51,14 @@ OFFLOAD = os.environ.get("WAN22_OFFLOAD", "none").lower()
 QUANT = os.environ.get("WAN22_QUANT", "int8wo").lower()
 TEXT_ENCODER_QUANT = os.environ.get("WAN22_TEXT_ENCODER_QUANT", "int8wo").lower()
 VAE_TILING = os.environ.get("WAN22_VAE_TILING", "1") == "1"
-# 仅 1080p：auto 在 >=90 GiB GPU 上保留双 expert；on/off 可强制测试/回退。
-EXPERT_RESIDENCY_1080P = os.environ.get("WAN22_1080P_EXPERT_RESIDENCY", "auto").lower()
+# 所有分辨率共用策略。兼容旧变量；新变量优先。
+EXPERT_RESIDENCY = os.environ.get(
+    "WAN22_EXPERT_RESIDENCY", os.environ.get("WAN22_1080P_EXPERT_RESIDENCY", "auto")
+).lower()
+# 720x1248、81 帧的激活预算，随像素/帧数放大；是保守启发式，不是实测峰值。
+RESIDENT_HEADROOM_GIB = float(os.environ.get("WAN22_RESIDENT_HEADROOM_GIB", "16"))
+# auto 保留历史 1080p 诊断；on 覆盖所有分辨率；off 用于无同步开销的吞吐测试。
+PROFILE = os.environ.get("WAN22_PROFILE", "auto").lower()
 QUANT_1080P = os.environ.get("WAN22_1080P_QUANT", "baseline").lower()
 UPSCALE_KEEP_WAN_1080P = os.environ.get("WAN22_1080P_UPSCALE_KEEP_WAN", "auto").lower()
 
@@ -139,6 +147,8 @@ UPSCALE_MODEL = os.environ.get(
 ).strip()
 UPSCALE_SCALE = float(os.environ.get("WAN22_UPSCALE_SCALE", "1.5"))
 UPSCALE_TIMEOUT = int(os.environ.get("WAN22_UPSCALE_TIMEOUT", "300"))
+# 默认保留 Lanczos 画质；GPU bicubic 需对照验收后再启用。
+UPSCALE_RESIZE = os.environ.get("WAN22_UPSCALE_RESIZE", "cpu_lanczos").lower()
 
 DEFAULT_PROMPT = os.environ.get(
     "WAN22_DEFAULT_PROMPT",

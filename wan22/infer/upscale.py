@@ -103,6 +103,7 @@ def upscale_video(video_path: str) -> None:
                     "video": str(video),
                     "output": str(tmp),
                     "scale": config.UPSCALE_SCALE,
+                    "resize": config.UPSCALE_RESIZE,
                 }
             )
         if not tmp.is_file() or tmp.stat().st_size < 64:
@@ -120,6 +121,21 @@ def upscale_video(video_path: str) -> None:
             raise
         logger.exception("upscale failed video=%s", video)
         raise UpscaleError(str(exc)) from exc
+
+
+def release_gpu() -> None:
+    """Leave CPU weights warm; if the worker cannot acknowledge offload, terminate it."""
+    with _lock:
+        if _proc is None:
+            return
+        try:
+            _write({"cmd": "offload"})
+            reply = _readline(timeout=min(config.UPSCALE_TIMEOUT, 30))
+            if not reply.get("ok") or reply.get("device") != "cpu":
+                raise UpscaleError(f"offload not acknowledged: {reply}")
+        except Exception:
+            logger.exception("upscale offload failed; terminate sidecar before resuming Wan")
+            _kill()
 
 
 def stop() -> None:

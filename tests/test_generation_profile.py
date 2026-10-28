@@ -28,19 +28,49 @@ class GenerationProfileTests(unittest.TestCase):
         self.modules.start()
         self.addCleanup(self.modules.stop)
 
-    def test_auto_residency_is_only_for_1080p_on_large_gpu(self):
-        with patch.object(config, "EXPERT_RESIDENCY_1080P", "auto"), patch.object(config, "OFFLOAD", "none"):
-            self.assertTrue(generate._resident_experts_1080p("1080p"))
-            for resolution in (None, "480p", "720p"):
-                self.assertFalse(generate._resident_experts_1080p(resolution))
+    def test_auto_residency_uses_load_and_actual_headroom(self):
+        with patch.object(config, "EXPERT_RESIDENCY", "auto"), patch.object(config, "OFFLOAD", "none"):
+            # Same 720p canvas for 720p and upscaled 1080p; output label is irrelevant.
+            self.assertTrue(generate._resident_experts(720, 1248, 81))
+            self.assertTrue(generate._resident_experts(480, 832, 237))
+            self.assertFalse(generate._resident_experts(720, 1248, 237))
+            self.torch.cuda.mem_get_info.return_value = (64 * 1024**3, 96 * 1024**3)
+            self.assertTrue(generate._resident_experts(720, 1248, 237))
+            self.torch.cuda.mem_get_info.return_value = (8 * 1024**3, 96 * 1024**3)
+            self.assertFalse(generate._resident_experts(480, 832, 77))
             self.torch.cuda.get_device_properties.return_value.total_memory = 48 * 1024**3
-            self.assertFalse(generate._resident_experts_1080p("1080p"))
+            self.assertFalse(generate._resident_experts(480, 832, 77))
 
     def test_explicit_off_and_offload_keep_original_policy(self):
-        with patch.object(config, "EXPERT_RESIDENCY_1080P", "off"), patch.object(config, "OFFLOAD", "none"):
-            self.assertFalse(generate._resident_experts_1080p("1080p"))
-        with patch.object(config, "EXPERT_RESIDENCY_1080P", "on"), patch.object(config, "OFFLOAD", "model"):
-            self.assertFalse(generate._resident_experts_1080p("1080p"))
+        with patch.object(config, "EXPERT_RESIDENCY", "off"), patch.object(config, "OFFLOAD", "none"):
+            self.assertFalse(generate._resident_experts(720, 1248, 237))
+        with patch.object(config, "EXPERT_RESIDENCY", "on"), patch.object(config, "OFFLOAD", "model"):
+            self.assertFalse(generate._resident_experts(720, 1248, 237))
+            pipe = Mock()
+            self.assertIsNone(generate._stage_experts(pipe, 237))
+            pipe.transformer.to.assert_not_called()
+        with patch.object(config, "EXPERT_RESIDENCY", "on"), patch.object(config, "OFFLOAD", "none"):
+            self.assertTrue(generate._resident_experts(720, 1248, 237))
+
+    def test_staging_offloads_before_loading_and_does_not_repeat_within_expert(self):
+        events = Mock()
+        pipe = SimpleNamespace(
+            transformer=events.high, transformer_2=events.low,
+            config=SimpleNamespace(boundary_ratio=0.9),
+            scheduler=SimpleNamespace(config=SimpleNamespace(num_train_timesteps=1000), timesteps=[999, 950, 800, 500]),
+        )
+        callback = generate._stage_experts(pipe, 237)
+        self.assertEqual([(c[0], c.args) for c in events.mock_calls], [("low.to", ("cpu",)), ("high.to", ("cuda",))])
+        events.reset_mock()
+        self.torch.cuda.empty_cache.reset_mock()
+        callback(pipe, 0, 999, {})
+        self.assertEqual(events.mock_calls, [])
+        self.torch.cuda.empty_cache.assert_not_called()
+        callback(pipe, 1, 950, {})
+        self.assertEqual([(c[0], c.args) for c in events.mock_calls], [("high.to", ("cpu",)), ("low.to", ("cuda",))])
+        events.reset_mock()
+        callback(pipe, 2, 800, {})
+        self.assertEqual(events.mock_calls, [])
 
     def test_resident_experts_have_no_swapping_callback(self):
         pipe = SimpleNamespace(transformer=Mock(), transformer_2=Mock())
@@ -75,7 +105,7 @@ class GenerationProfileTests(unittest.TestCase):
         )
         original_prompt = pipe.encode_prompt
         with self.assertRaisesRegex(RuntimeError, "decode failed"):
-            with generate._profile_1080p(pipe) as stats:
+            with generate._profile_generation(pipe) as stats:
                 self.assertEqual(pipe.encode_prompt(), "prompt")
                 self.assertEqual(pipe.prepare_latents(), "latents")
                 self.assertEqual(pipe.transformer.forward(), 7)
@@ -85,7 +115,7 @@ class GenerationProfileTests(unittest.TestCase):
         self.assertNotIn("forward", vars(pipe.transformer))
         self.assertNotIn("forward", vars(pipe.transformer_2))
         self.assertNotIn("decode", vars(pipe.vae))
-        self.assertEqual(set(stats), {"prompt_s", "latent_prepare_s", "denoise_s", "vae_decode_s"})
+        self.assertEqual(set(stats), {"prompt_s", "latent_prepare_s", "denoise_s", "vae_decode_s", "peak_allocated_gib", "peak_reserved_gib"})
         self.assertTrue(all(value >= 0 for value in stats.values()))
 
     def test_generation_profiles_only_1080p_and_keeps_request_parameters(self):
@@ -116,7 +146,11 @@ class GenerationProfileTests(unittest.TestCase):
         image = SimpleNamespace(width=720, height=1248)
         with ExitStack() as stack:
             stack.enter_context(patch.object(config, "DRY_RUN", False))
-            stack.enter_context(patch.object(config, "EXPERT_RESIDENCY_1080P", "auto"))
+            stack.enter_context(patch.object(config, "PROFILE", "auto"))
+            stack.enter_context(patch("wan22.infer.attention.snapshot", return_value={}))
+            stack.enter_context(patch("wan22.infer.attention.delta", return_value={}))
+            self.torch.cuda.mem_get_info.return_value = (64 * 1024**3, 96 * 1024**3)
+            stack.enter_context(patch.object(config, "EXPERT_RESIDENCY", "auto"))
             stack.enter_context(patch.object(config, "OFFLOAD", "none"))
             stack.enter_context(patch.object(config, "QUANT_1080P", "baseline"))
             stack.enter_context(patch.dict(sys.modules, {"diffusers.utils": SimpleNamespace(export_to_video=export)}))
@@ -132,7 +166,7 @@ class GenerationProfileTests(unittest.TestCase):
                 self.assertEqual(seed, 42)
                 self.assertNotIn("encode_prompt", vars(pipe))
                 self.assertNotIn("prepare_latents", vars(pipe))
-            self.assertEqual([call.kwargs["resident"] for call in stage.call_args_list], [True, False, False])
+            self.assertEqual([call.kwargs["resident"] for call in stage.call_args_list], [True, True, True])
         self.torch.cuda.reset_peak_memory_stats.assert_called_once()
         self.assertEqual(export.call_count, 3)
         for request in pipe.calls:
@@ -247,6 +281,17 @@ class GenerationProfileTests(unittest.TestCase):
         pipe.to.side_effect = [Oom("out of memory"), None]
         with patch.object(config, "OFFLOAD", "none"):
             self.assertFalse(generate._prepare_initial_gpu(pipe))
+        self.assertEqual([call.args[0] for call in pipe.to.call_args_list], ["cuda", "cpu"])
+
+    def test_failed_restore_invalidates_pipeline_and_releases_remaining_gpu_weights(self):
+        pipe = Mock()
+        pipe.to.side_effect = [RuntimeError("restore OOM"), None]
+        with patch.object(generate, "_pipe", pipe), patch.object(generate, "_load_error", None), patch.object(config, "DRY_RUN", False):
+            with self.assertRaisesRegex(RuntimeError, "restore OOM"):
+                generate.resume_gpu()
+            self.assertIsNone(generate._pipe)
+            self.assertFalse(generate.is_ready())
+            self.assertIn("restore OOM", generate.load_error())
         self.assertEqual([call.args[0] for call in pipe.to.call_args_list], ["cuda", "cpu"])
 
 

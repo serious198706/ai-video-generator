@@ -9,7 +9,10 @@ from typing import Any
 from wan22 import config
 from wan22.infer import generate
 from wan22.infer.foley import FoleyError, add_audio
-from wan22.infer.upscale import UpscaleError, UpscaleOutOfMemory, stop as stop_upscale, upscale_video
+from wan22.infer.upscale import (
+    UpscaleError, UpscaleOutOfMemory, release_gpu as release_upscale_gpu,
+    stop as stop_upscale, upscale_video,
+)
 from wan22.log import get_logger
 from wan22.media import download, status, webhook
 from wan22.media.upload import upload_video
@@ -114,6 +117,7 @@ def _run(task: dict[str, Any]) -> dict[str, Any]:
         foley_ok = 0
         upscale_ok = 0
         used_seed = task.get("seed")
+        generation_metrics: dict = {}
         gen_started = time.monotonic()
         status.write(task_id, "generating")
         try:
@@ -128,6 +132,7 @@ def _run(task: dict[str, Any]) -> dict[str, Any]:
                 negative_prompt=task.get("negative_prompt"),
                 quality=task.get("quality"),
                 resolution=task.get("resolution"),
+                metrics=generation_metrics,
             )
         except Exception:
             logger.exception("generate failed task=%s", task_id)
@@ -145,10 +150,20 @@ def _run(task: dict[str, Any]) -> dict[str, Any]:
         needs_upscale = (task.get("resolution") or "").lower() == "1080p" and not config.DRY_RUN
         needs_foley = config.FOLEY_ENABLE and not config.DRY_RUN and bool(task.get("audio"))
         if needs_upscale or needs_foley:
+            transfer_s = 0.0
+            def move_wan(action):
+                nonlocal transfer_s
+                moved = time.monotonic()
+                try:
+                    action()
+                finally:
+                    transfer_s += time.monotonic() - moved
+
             shared_gpu = needs_upscale and not needs_foley and generate.can_share_gpu_for_upscale(task.get("resolution"))
             paused = False
+            upscale_released = False
             if not shared_gpu:
-                generate.pause_gpu()
+                move_wan(generate.pause_gpu)
                 paused = True
             else:
                 logger.info("1080p keep Wan on GPU during upscale task=%s", task_id)
@@ -163,7 +178,7 @@ def _run(task: dict[str, Any]) -> dict[str, Any]:
                                 raise
                             logger.warning("1080p shared upscale CUDA OOM; retry with Wan on CPU task=%s", task_id)
                             stop_upscale()
-                            generate.pause_gpu()
+                            move_wan(generate.pause_gpu)
                             paused = True
                             upscale_video(output)
                         upscale_ok = 1
@@ -182,6 +197,10 @@ def _run(task: dict[str, Any]) -> dict[str, Any]:
                         )
                         return {"status": "failed", "error": "upscale_failed"}
                     upscale_s = time.monotonic() - upscale_t
+                    # Release SR weights before Foley starts, including the non-sharing path.
+                    if needs_foley:
+                        release_upscale_gpu()
+                        upscale_released = True
                 if needs_foley:
                     foley_failed = False
                     foley_t = time.monotonic()
@@ -207,11 +226,13 @@ def _run(task: dict[str, Any]) -> dict[str, Any]:
                         )
                         return {"status": "failed", "error": "foley_failed"}
             finally:
-                if shared_gpu:
-                    # 释放 sidecar 的 CUDA context，避免影响下一条 480p/720p 的显存。
-                    stop_upscale()
+                if needs_upscale and not upscale_released:
+                    # Same lifecycle for shared and non-shared paths. Keep CPU weights warm.
+                    release_upscale_gpu()
                 if paused:
-                    generate.resume_gpu()
+                    move_wan(generate.resume_gpu)
+        else:
+            transfer_s = 0.0
 
         upload_t = time.monotonic()
         if config.DRY_RUN:
@@ -272,6 +293,8 @@ def _run(task: dict[str, Any]) -> dict[str, Any]:
                 "upscale_s": round(upscale_s, 3),
                 "foley_s": round(foley_s, 3),
                 "upload_s": round(upload_s, 3),
+                "transfer_s": round(transfer_s, 3),
+                "generation": generation_metrics,
             },
         }
     except UrlError:

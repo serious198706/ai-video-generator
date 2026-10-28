@@ -2,7 +2,7 @@
 
 无情的生成机器：从 SQS 拉任务 → 生成 → 上传 S3 → 写状态文件 → webhook 回调 → 删消息。部署在 vast.ai 上，接单走 `lambda_api`（Lambda + SQS），本机不暴露任何生成接口。
 
-没有队列（进程内单执行位，忙时消息退回 SQS）、没有 Redis、没有 SQLite 留档。幂等靠 S3 状态文件，崩溃恢复靠 SQS 重投。推理是 WAMU Lightning I2V，attention 默认用 SageAttention 替换 SDPA（`WAN22_SAGE=1`，未安装自动回退 SDPA，timing 日志 `sage=1/0` 可查）。480p 画布约 480×832；720p 约 720×1248；`1080p` 先按 720p 生成，再用 compact（realesr-general-x4v3）超到约 1080×1872。
+没有队列（进程内单执行位，忙时消息退回 SQS）、没有 Redis、没有 SQLite 留档。幂等靠 S3 状态文件，崩溃恢复靠 SQS 重投。推理是 WAMU Lightning I2V，attention 默认用 SageAttention 替换 SDPA（`WAN22_SAGE=1`，未安装自动回退 SDPA，每单 `attention` 日志记录实际调用/回退次数）。480p 画布约 480×832；720p 约 720×1248；`1080p` 先按 720p 生成，再用 compact（realesr-general-x4v3）超到约 1080×1872。
 
 ```
 server/
@@ -54,19 +54,16 @@ vast.ai 上如果 `nvcc --version` 是 13.2，而 `python -c 'import torch; prin
 
 更新 GPU 机器上的脚本后重跑 `./deploy.sh` 即可。自定义安装位置可用 `CUDA_HOME=/path/to/cuda-12.8 ./deploy.sh`；只想跳过 SageAttention 安装可用 `WAN22_SAGE_SKIP=1 ./deploy.sh`（也可写进 `.env`）。
 
-1080p 性能测试：`WAN22_1080P_EXPERT_RESIDENCY=auto`（默认）会在总显存至少 90 GiB 且 `WAN22_OFFLOAD=none` 时让两个 expert 在去噪期间同时驻留 GPU，取消长视频的分时搬运；480p、720p 及较小显存 GPU 仍走原策略。可在 `.env` 中设 `on` 强制开启或 `off` 恢复原策略，重启 worker 生效。容量判断不保证峰值一定能放下；如果遇到显存不足，设 `off` 回退。本轮保留现有量化、生成尺寸、帧数和步数。
+96GB 显存优化与手动 GPU 对照测试见 [BENCHMARK.md](BENCHMARK.md)。当前代码不更改模型、步数、帧数、CFG、VAE 精度或默认超分插值。
 
-每次 1080p 生成会输出 `1080p profile`：`prompt_s` 为文本编码，`latent_prepare_s` 包含输入图像 VAE 编码，`denoise_s` 为两个 expert 前向计算累计耗时，`vae_decode_s` 为视频 VAE 解码；同时输出 GPU 峰值 allocated/reserved GiB。`1080p generation` 记录 expert 准备、生成后模型恢复、视频导出耗时。计时使用 CUDA 同步，可能引入少量测量开销；阶段日志不含所有调度开销，不要求相加等于 runner 的 `generate_s`。`denoise_s` 不包含步间 expert 搬运。对比时固定图片、提示词、seed、时长和 steps，并比较预热后的请求。
+- `WAN22_EXPERT_RESIDENCY=auto`：所有分辨率按实际生成画布和帧数决定驻留。总显存 >=90 GiB，且空闲显存满足 `WAN22_RESIDENT_HEADROOM_GIB × max(1, 像素数/898560 × 帧数/81)` GiB 时双 expert 常驻，预算系数默认 16。这是可调启发式，不是 OOM 保证。`on` 强制常驻；`off` 强制分时加载（也包含短片）。新变量优先；未设置时兼容旧 `WAN22_1080P_EXPERT_RESIDENCY`，但旧变量现在应用于所有分辨率。分时加载只在 expert 变化时执行，先卸载旧模型再加载新模型；Accelerate offload 模式不再混入手动搬运。
+- `WAN22_SAGE_BACKEND=auto|sdpa|sage2|sage3`：auto 保持原 Sage3 → Sage2 → SDPA 顺序，`WAN22_SAGE=0` 仍强制关闭。每单记录实际后端、Sage/SDPA 调用数、回退次数。某个形状发生内核错误后只记录一次并熔断到 SDPA；CUDA OOM 原样抛出。显式后端安装失败仍允许服务回退，benchmark 则拒绝把回退结果当作该后端的成绩。
+- `WAN22_PROFILE=auto|on|off`：auto 保留仅 1080p 详细计时，on 覆盖全部分辨率，off 关闭阶段同步计时。`generation profile` 记录 prompt、latent_prepare、denoise、vae_decode 和 allocated/reserved 峰值；所有请求都有 `generation` 和 `attention` 日志。S3 成功状态的 `timing.generation` 包含这些生成指标，`timing.transfer_s` 记录后处理 Wan 搬运。阶段统计不包含全部调度/清理开销，不要求相加等于总耗时。
+- `WAN22_1080P_QUANT=baseline`：沿用 `WAN22_QUANT`，旧 auto 也使用基线。之前在 RTX PRO 6000 Blackwell 上的 FP8 试验出现非有限数值/黑屏，因此 `float8dq` 仅保留为显式实验，不能作为默认提速方案。独立 FP8 expert 从 BF16 加载、融合 LoRA、跳过 FP32 例外层后量化；未使用的 pair 留在 CPU，增加主机内存占用。
+- `WAN22_1080P_UPSCALE_KEEP_WAN=auto`：无 Foley 的 1080p、总显存 >=90 GiB、清理缓存后空闲 >=16 GiB 时共享 GPU。超分 CUDA OOM 时终止 sidecar、卸载 Wan 并重试一次。所有路径都在 Foley/恢复 Wan 前让超分权重回到 CPU；失败则杀掉 sidecar。CPU 权重和进程保留，下单无需重复导入和从磁盘加载；CUDA context 仍占少量显存，预算查询使用实际空闲值。
+- `WAN22_UPSCALE_RESIZE=cpu_lanczos`：默认保留现有 Lanczos 缩放，4×结果在设备上转成 uint8 后回传，减少 D2H 数据量。实验项 `gpu_bicubic` 在 GPU 上先缩至最终尺寸，再回传 uint8；这会改变插值，应比较皮肤、发丝、文字、运动闪烁后再采用。
 
-1080p 去噪与搬运优化（VAE 配置不变）：
-
-- `WAN22_1080P_QUANT=baseline`（默认）：沿用 `WAN22_QUANT`，不准备第二套 FP8 expert。旧配置 `auto` 现在也使用基线。RTX PRO 6000 Blackwell 上的实测 FP8 输出出现非有限数值/黑屏，因此撤销默认启用；`float8dq` 仅保留为显式实验选项（compute capability >=8.9 且 `WAN22_OFFLOAD=none`），不建议用于正式任务。
-- FP8 pair 从原始 BF16 权重重新加载并融合相同 LoRA，不从 INT8 权重二次量化。文本编码器、VAE 和普通分辨率的原始 expert 不改。FP8 与基线 expert 分别缓存，未使用的一组停在 CPU；需要额外主机内存。首次 1080p 包含加载/量化成本，日志 `expert mode=1080p-float8dq switch_s=...` 和 `quant_select_s` 可区分冷启动；连续 1080p 复用 FP8 pair。切回 480p/720p 会搬回原始 expert，因此切换分辨率的第一单有额外搬运时间，但量化配置和推理参数仍保持原设置。
-- `WAN22_1080P_UPSCALE_KEEP_WAN=auto`（默认）：仅无 Foley 的 1080p、至少 90 GiB GPU，在释放 PyTorch 空闲缓存后剩余显存至少 16 GiB 时，超分期间让 Wan 留在 GPU。`on` 可在较小 GPU 上测试（仍需至少 16 GiB 实际空闲），`off` 恢复搬运。若超分进程明确报告 CUDA OOM，则终止进程、把 Wan 搬到 CPU，并仅重试超分一次；其他错误不自动重试。共享模式收尾会终止超分进程，避免它的 CUDA context 占用下一单显存。带 Foley 的任务保留原搬运流程。
-
-测试时在 `.env` 中设置上述变量并重启 worker，无需重新运行 `deploy.sh`。仅在显式测试 FP8 时，先连续跑两次同参数 1080p，以第二次的 `denoise_s`、`generate_s`、`total_s` 与已记录的 445.676 / 552.732 / 777.020 秒对比，并抽帧核对画质。FP8 兼容性或画质不合适时，设 `WAN22_1080P_QUANT=baseline` 重启；若只想恢复超分搬运，设 `WAN22_1080P_UPSCALE_KEEP_WAN=off`。本轮不改帧数、采样步数、画布、VAE 精度/tiling 或超分模型。
-
-FP8 初始化时新 pair 先移到 GPU 融合 LoRA，融合后仅将参与量化的 Linear 归一化为 BF16，并跳过模型 `_keep_in_fp32_modules` 指定的层（如 `time_embedder`），避免原始 FP32 层或 PEFT 精度提升触发 `PerRow quantization only works for bfloat16 precision input weight`。日志分别记录 `fuse_s` 和 `quantize_s`。在 `auto` 模式下，若初始化仍失败，会恢复基线 expert 继续本次生成，并在当前进程中禁用后续 FP8 初始化尝试；重启后才重新尝试。强制 `float8dq` 模式仍保留报错，便于定位问题。此回退只覆盖 FP8 准备阶段，不覆盖后续去噪中的错误。
+改 `.env` 后重启 worker 即可，无需重新部署依赖。旧日志里的 445.676 / 552.732 / 777.020 秒仅为历史参考，不能与不同输入、后端或计时设置的结果直接比较。
 
 干净 Ubuntu 26.04（裸金属，没有 DLAMI）先做系统层，再走上面的 `deploy.sh`：
 
@@ -135,7 +132,7 @@ Foley 钉了旧版 transformers，venv 与 Wan 分开。Sidecar 常驻，权重�
 
 ## 1080p
 
-`resolution=1080p` 不会把 Lightning 画布拉到 1080×1872。worker 先按 720p 出无声片，把 Wan 挪到 CPU，compact sidecar（`realesr-general-x4v3`，4× 后再 Lanczos 到 1.5×，竖屏约 1080×1872）超分，再配 Foley、上传。超分失败短码 `upscale_failed`，不退回 720p。没装超分时 POST 1080p 返回 503。第一次 1080p 会加载超分权重，后面复用。
+`resolution=1080p` 先按 720p 生成，再用 compact（`realesr-general-x4v3`）4×超分并缩至 1.5×，竖屏约 1080×1872，然后可选 Foley、上传。显存充足且无 Foley 时 Wan 留在 GPU，否则临时放 CPU。超分权重空闲时留在 CPU，进程复用。超分失败返回 `upscale_failed`，不会把 720p 片标为 1080p 成功。GPU 缩放的可选项与对照方式见上文及 [BENCHMARK.md](BENCHMARK.md)。
 
 ## 已知约束
 
