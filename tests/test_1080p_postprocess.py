@@ -17,14 +17,14 @@ from wan22.tasks import runner
 
 
 class PostprocessGpuTests(unittest.TestCase):
-    def run_task(self, *, shared=True, audio=False, resolution="1080p", errors=None):
+    def run_task(self, *, shared=True, audio=False, resolution="1080p", errors=None, generate_error=None):
         with ExitStack() as stack:
             stack.enter_context(patch.object(config, "DRY_RUN", False))
             stack.enter_context(patch.object(config, "FOLEY_ENABLE", audio))
             stack.enter_context(patch.object(runner, "_ensure_image", return_value=None))
             stack.enter_context(patch.object(runner, "_cleanup_frames"))
             stack.enter_context(patch.object(runner.status, "write"))
-            stack.enter_context(patch.object(runner.generate, "generate_video", return_value=42))
+            stack.enter_context(patch.object(runner.generate, "generate_video", return_value=42, side_effect=generate_error))
             share = stack.enter_context(patch.object(runner.generate, "can_share_gpu_for_upscale", return_value=shared))
             events = Mock()
             for owner, attr, label in (
@@ -80,6 +80,13 @@ class PostprocessGpuTests(unittest.TestCase):
         self.assertEqual(result["status"], "succeeded")
         share.assert_not_called()
         self.assertEqual([call[0] for call in events.mock_calls], ["upload"])
+
+    def test_invalid_generation_is_not_upscaled_or_uploaded(self):
+        result, events, share = self.run_task(generate_error=ValueError("invalid generated video: non-finite"))
+        self.assertEqual(result["error"], "generate_failed")
+        events.upscale.assert_not_called()
+        events.upload.assert_not_called()
+        share.assert_not_called()
 
     def test_sidecar_oom_reply_is_typed_and_other_errors_stay_generic(self):
         with patch.object(upscale, "_write"), patch.object(upscale, "_readline", return_value={"ok": False, "error_type": "cuda_oom", "error": "OOM"}):

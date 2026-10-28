@@ -383,6 +383,28 @@ def _apply_sage() -> bool:
         return False
 
 
+def _prepare_initial_gpu(pipe) -> bool:
+    """大显存且实际空闲充足时，在 GPU 融合/量化；小卡保持原路径。"""
+    import torch
+
+    if config.OFFLOAD != "none" or torch.cuda.get_device_properties(0).total_memory < 90 * 1024**3:
+        return False
+    torch.cuda.empty_cache()
+    free, _ = torch.cuda.mem_get_info()
+    if free < 80 * 1024**3:
+        logger.info("initial preparation on CPU: free_gib=%.2f (GPU preparation needs 80)", free / 1024**3)
+        return False
+    try:
+        _log_memory("moving unquantized pipeline to GPU for LoRA fusion and quantization")
+        pipe.to("cuda")
+    except torch.cuda.OutOfMemoryError:
+        pipe.to("cpu")
+        torch.cuda.empty_cache()
+        logger.warning("initial GPU placement OOM; continue preparation on CPU")
+        return False
+    return True
+
+
 def _build_pipe():
     import torch
     from diffusers import AutoencoderKLWan, WanImageToVideoPipeline
@@ -412,6 +434,7 @@ def _build_pipe():
     if config.VAE_TILING:
         pipe.vae.enable_tiling()
 
+    _prepare_initial_gpu(pipe)
     _fuse_nsfw_loras(pipe)
     _quantize_pipe(pipe)
     _apply_sage()
@@ -437,20 +460,17 @@ def load_pipe():
 
 
 def _use_fp8_1080p(resolution: str | None) -> bool:
-    if (resolution or "").lower() != "1080p" or config.QUANT_1080P == "baseline":
+    # auto 曾默认开启实验 FP8；发现非有限输出后，兼容旧 .env 的 auto 也恢复基线。
+    if (resolution or "").lower() != "1080p" or config.QUANT_1080P != "float8dq":
         return False
     if config.OFFLOAD != "none":
-        if config.QUANT_1080P == "float8dq":
-            raise ValueError("1080p float8dq requires WAN22_OFFLOAD=none")
-        return False
+        raise ValueError("1080p float8dq requires WAN22_OFFLOAD=none")
     import torch
 
     supported = torch.cuda.get_device_capability(0) >= (8, 9)
-    if config.QUANT_1080P == "float8dq":
-        if not supported:
-            raise ValueError("1080p float8dq requires NVIDIA compute capability >=8.9")
-        return True
-    return supported and torch.cuda.get_device_properties(0).total_memory >= 90 * 1024**3
+    if not supported:
+        raise ValueError("1080p float8dq requires NVIDIA compute capability >=8.9")
+    return True
 
 
 def _prepare_fp8_linears(expert):
@@ -792,6 +812,23 @@ def _resize_and_crop_to_match(
     )
 
 
+def _validate_video_frames(frames) -> None:
+    """在编码/超分/上传之前拒绝 NaN/Inf 和整段纯黑，不将坏结果标为成功。"""
+    import numpy as np
+
+    if len(frames) == 0:
+        raise ValueError("invalid generated video: no frames")
+    all_black = True
+    for index, frame in enumerate(frames):
+        array = np.asarray(frame)
+        if array.size == 0 or not np.isfinite(array).all():
+            raise ValueError(f"invalid generated video: empty/non-finite values at frame {index}; export blocked")
+        if np.any(array != 0):
+            all_black = False
+    if all_black:
+        raise ValueError("invalid generated video: all frames are black; export blocked")
+
+
 def generate_video(
     prompt: str,
     output_path: str,
@@ -903,6 +940,7 @@ def generate_video(
                 logger.exception("restore pipeline to cuda failed")
         restore_s = time.perf_counter() - restore_started
     export_started = time.perf_counter()
+    _validate_video_frames(frames)
     export_to_video(
         frames,
         output_path,

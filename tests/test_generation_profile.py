@@ -109,7 +109,7 @@ class GenerationProfileTests(unittest.TestCase):
                 self.prepare_latents()
                 self.transformer.forward()
                 self.vae.decode()
-                return SimpleNamespace(frames=[["frame"]])
+                return SimpleNamespace(frames=[[[0.5]]])
 
         pipe = Pipe()
         export = Mock()
@@ -139,9 +139,9 @@ class GenerationProfileTests(unittest.TestCase):
             self.assertEqual(request["num_inference_steps"], 4)
             self.assertEqual(request["num_frames"], 237)
 
-    def test_fp8_policy_keeps_other_resolutions_and_small_cards_on_baseline(self):
+    def test_auto_fp8_is_disabled_even_on_large_blackwell_gpu(self):
         with patch.object(config, "QUANT_1080P", "auto"), patch.object(config, "OFFLOAD", "none"):
-            self.assertTrue(generate._use_fp8_1080p("1080p"))
+            self.assertFalse(generate._use_fp8_1080p("1080p"))
             for resolution in (None, "480p", "720p"):
                 self.assertFalse(generate._use_fp8_1080p(resolution))
             self.torch.cuda.get_device_properties.return_value.total_memory = 48 * 1024**3
@@ -156,7 +156,7 @@ class GenerationProfileTests(unittest.TestCase):
         quantize = Mock()
         fake_ao = SimpleNamespace(Float8DynamicActivationFloat8WeightConfig=Mock(), quantize_=quantize)
         with (
-            patch.object(config, "QUANT_1080P", "auto"),
+            patch.object(config, "QUANT_1080P", "float8dq"),
             patch.object(config, "OFFLOAD", "none"),
             patch.object(generate, "_load_transformer", side_effect=fp8) as load,
             patch.object(generate, "_prepare_fp8_linears", return_value=lambda *_: True),
@@ -223,6 +223,49 @@ class GenerationProfileTests(unittest.TestCase):
             self.assertFalse(generate.can_share_gpu_for_upscale("720p"))
             self.torch.cuda.mem_get_info.return_value = (8 * 1024**3, 96 * 1024**3)
             self.assertFalse(generate.can_share_gpu_for_upscale("1080p"))
+
+    def test_initial_gpu_preparation_checks_capacity_and_free_memory(self):
+        pipe = Mock()
+        with patch.object(config, "OFFLOAD", "none"):
+            self.assertFalse(generate._prepare_initial_gpu(pipe))
+            pipe.to.assert_not_called()
+            self.torch.cuda.mem_get_info.return_value = (85 * 1024**3, 96 * 1024**3)
+            self.assertTrue(generate._prepare_initial_gpu(pipe))
+            pipe.to.assert_called_once_with("cuda")
+            pipe.to.reset_mock()
+            self.torch.cuda.get_device_properties.return_value.total_memory = 48 * 1024**3
+            self.assertFalse(generate._prepare_initial_gpu(pipe))
+            pipe.to.assert_not_called()
+
+    def test_initial_gpu_oom_returns_pipeline_to_cpu(self):
+        class Oom(RuntimeError):
+            pass
+
+        self.torch.cuda.OutOfMemoryError = Oom
+        self.torch.cuda.mem_get_info.return_value = (85 * 1024**3, 96 * 1024**3)
+        pipe = Mock()
+        pipe.to.side_effect = [Oom("out of memory"), None]
+        with patch.object(config, "OFFLOAD", "none"):
+            self.assertFalse(generate._prepare_initial_gpu(pipe))
+        self.assertEqual([call.args[0] for call in pipe.to.call_args_list], ["cuda", "cpu"])
+
+
+class VideoValidationTests(unittest.TestCase):
+    def test_nonfinite_frames_and_entirely_black_video_are_rejected(self):
+        import numpy as np
+
+        for value in (np.nan, np.inf, -np.inf, 0.0):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "invalid generated video"):
+                generate._validate_video_frames(np.full((2, 2, 2, 3), value))
+        with self.assertRaisesRegex(ValueError, "no frames"):
+            generate._validate_video_frames([])
+
+    def test_valid_video_with_one_black_frame_is_allowed(self):
+        import numpy as np
+
+        frames = np.zeros((2, 2, 2, 3))
+        frames[1] = 0.5
+        generate._validate_video_frames(frames)
 
 
 class Fp8DtypeRegressionTests(unittest.TestCase):

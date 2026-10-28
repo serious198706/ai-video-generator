@@ -60,11 +60,11 @@ vast.ai 上如果 `nvcc --version` 是 13.2，而 `python -c 'import torch; prin
 
 1080p 去噪与搬运优化（VAE 配置不变）：
 
-- `WAN22_1080P_QUANT=auto`（默认）：在至少 90 GiB、compute capability >=8.9、`WAN22_OFFLOAD=none` 的 NVIDIA GPU 上启用独立 FP8 动态量化 expert，使用 TorchAO `Float8DynamicActivationFloat8WeightConfig(granularity=PerRow())`。RTX PRO 6000 Blackwell 96GB + torch 2.11/cu128 + torchao 0.18 是本次目标测试环境，仍需服务器验证速度和画质。可设 `float8dq` 强制测试；`baseline` 恢复 `WAN22_QUANT`。
+- `WAN22_1080P_QUANT=baseline`（默认）：沿用 `WAN22_QUANT`，不准备第二套 FP8 expert。旧配置 `auto` 现在也使用基线。RTX PRO 6000 Blackwell 上的实测 FP8 输出出现非有限数值/黑屏，因此撤销默认启用；`float8dq` 仅保留为显式实验选项（compute capability >=8.9 且 `WAN22_OFFLOAD=none`），不建议用于正式任务。
 - FP8 pair 从原始 BF16 权重重新加载并融合相同 LoRA，不从 INT8 权重二次量化。文本编码器、VAE 和普通分辨率的原始 expert 不改。FP8 与基线 expert 分别缓存，未使用的一组停在 CPU；需要额外主机内存。首次 1080p 包含加载/量化成本，日志 `expert mode=1080p-float8dq switch_s=...` 和 `quant_select_s` 可区分冷启动；连续 1080p 复用 FP8 pair。切回 480p/720p 会搬回原始 expert，因此切换分辨率的第一单有额外搬运时间，但量化配置和推理参数仍保持原设置。
 - `WAN22_1080P_UPSCALE_KEEP_WAN=auto`（默认）：仅无 Foley 的 1080p、至少 90 GiB GPU，在释放 PyTorch 空闲缓存后剩余显存至少 16 GiB 时，超分期间让 Wan 留在 GPU。`on` 可在较小 GPU 上测试（仍需至少 16 GiB 实际空闲），`off` 恢复搬运。若超分进程明确报告 CUDA OOM，则终止进程、把 Wan 搬到 CPU，并仅重试超分一次；其他错误不自动重试。共享模式收尾会终止超分进程，避免它的 CUDA context 占用下一单显存。带 Foley 的任务保留原搬运流程。
 
-测试时在 `.env` 中设置上述变量并重启 worker，无需重新运行 `deploy.sh`。先连续跑两次同参数 1080p，以第二次的 `denoise_s`、`generate_s`、`total_s` 与已记录的 445.676 / 552.732 / 777.020 秒对比，并抽帧核对画质。FP8 兼容性或画质不合适时，设 `WAN22_1080P_QUANT=baseline` 重启；若只想恢复超分搬运，设 `WAN22_1080P_UPSCALE_KEEP_WAN=off`。本轮不改帧数、采样步数、画布、VAE 精度/tiling 或超分模型。
+测试时在 `.env` 中设置上述变量并重启 worker，无需重新运行 `deploy.sh`。仅在显式测试 FP8 时，先连续跑两次同参数 1080p，以第二次的 `denoise_s`、`generate_s`、`total_s` 与已记录的 445.676 / 552.732 / 777.020 秒对比，并抽帧核对画质。FP8 兼容性或画质不合适时，设 `WAN22_1080P_QUANT=baseline` 重启；若只想恢复超分搬运，设 `WAN22_1080P_UPSCALE_KEEP_WAN=off`。本轮不改帧数、采样步数、画布、VAE 精度/tiling 或超分模型。
 
 FP8 初始化时新 pair 先移到 GPU 融合 LoRA，融合后仅将参与量化的 Linear 归一化为 BF16，并跳过模型 `_keep_in_fp32_modules` 指定的层（如 `time_embedder`），避免原始 FP32 层或 PEFT 精度提升触发 `PerRow quantization only works for bfloat16 precision input weight`。日志分别记录 `fuse_s` 和 `quantize_s`。在 `auto` 模式下，若初始化仍失败，会恢复基线 expert 继续本次生成，并在当前进程中禁用后续 FP8 初始化尝试；重启后才重新尝试。强制 `float8dq` 模式仍保留报错，便于定位问题。此回退只覆盖 FP8 准备阶段，不覆盖后续去噪中的错误。
 
@@ -140,3 +140,7 @@ Foley 钉了旧版 transformers，venv 与 Wan 分开。Sidecar 常驻，权重�
 ## 已知约束
 
 与旧服务相同：I2V 锁首帧、CFG=1 负向词无效、单卡串行。成片对象键为 `{WAN22_S3_PREFIX}{task_id}.mp4`。详见仓库里 `wan22-api/README.md` 的推理说明。
+
+启动与异常输出：启动预加载只加载权重，不创建视频任务，也不上传 S3。配置 SQS 后，consumer 会自动领取已有消息；`receive=2` 代表重新投递，并非预热请求。首次任务可等待预加载锁，因此 runner 的生成计时可能包含冷启动。至少 90 GiB 且实际空闲至少 80 GiB、无 offload 时，基线初始化先上 GPU 再融合 LoRA 和量化，避免在 CPU 上运行数分钟的矩阵运算；小卡/空闲不足沿用 CPU 路径，GPU 初始放置 OOM 则回退 CPU。VAE 精度和 tiling 不变。
+
+生成帧在导出前检查：空帧、NaN/Inf 或整段全零黑屏会导致任务失败，不进入超分或上传，也不会标为 succeeded。单个正常黑帧不影响其它有效帧。该检查只拦截明显异常，不代表全面画质验收。
