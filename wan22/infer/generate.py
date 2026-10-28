@@ -644,11 +644,12 @@ def _profile_generation(pipe):
         # prepare_latents 包含首/尾图的 VAE 编码。
         wrap(pipe, "prepare_latents", "latent_prepare_s")
         wrap(pipe.vae, "decode", "vae_decode_s")
-        wrap(pipe.transformer, "forward", "denoise_s")
+        wrap(pipe.transformer, "forward", "denoise_high_s")
         if getattr(pipe, "transformer_2", None) is not None:
-            wrap(pipe.transformer_2, "forward", "denoise_s")
+            wrap(pipe.transformer_2, "forward", "denoise_low_s")
         yield stats
     finally:
+        stats["denoise_s"] = stats.get("denoise_high_s", 0.0) + stats.get("denoise_low_s", 0.0)
         for owner, name, previous in reversed(patched):
             if previous is missing:
                 delattr(owner, name)

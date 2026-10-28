@@ -115,7 +115,8 @@ class GenerationProfileTests(unittest.TestCase):
         self.assertNotIn("forward", vars(pipe.transformer))
         self.assertNotIn("forward", vars(pipe.transformer_2))
         self.assertNotIn("decode", vars(pipe.vae))
-        self.assertEqual(set(stats), {"prompt_s", "latent_prepare_s", "denoise_s", "vae_decode_s", "peak_allocated_gib", "peak_reserved_gib"})
+        self.assertEqual(set(stats), {"prompt_s", "latent_prepare_s", "denoise_s", "denoise_high_s", "denoise_low_s", "vae_decode_s", "peak_allocated_gib", "peak_reserved_gib"})
+        self.assertEqual(stats["denoise_s"], stats["denoise_high_s"] + stats["denoise_low_s"])
         self.assertTrue(all(value >= 0 for value in stats.values()))
 
     def test_generation_profiles_only_1080p_and_keeps_request_parameters(self):

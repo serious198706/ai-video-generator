@@ -16,6 +16,19 @@ from wan22.infer.upscale_sidecar import _write_rgb_mp4
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_zero_warmup_requires_diagnostic_profiling(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "image.png"
+            prompt = Path(directory) / "prompt.txt"
+            image.touch()
+            prompt.write_text("A slow camera pan")
+            args = ["--image", str(image), "--prompt-file", str(prompt), "--output", str(Path(directory) / "out"), "--warmup", "0", "--runs", "1"]
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                benchmark.arguments(args)
+            parsed = benchmark.arguments(args + ["--profile", "on"])
+            self.assertEqual(parsed.warmup, 0)
+            self.assertEqual(parsed.runs, 1)
+
     def test_rejects_compile_with_instrumentation_or_offload(self):
         with tempfile.TemporaryDirectory() as directory:
             image = Path(directory) / "image.png"

@@ -39,8 +39,10 @@ def arguments(argv=None):
     args = parser.parse_args(argv)
     if not 0 < args.duration <= 15 or not 1 <= args.steps <= 50 or not 1 <= args.quality <= 10:
         parser.error("duration must be (0,15], steps 1..50, quality 1..10")
-    if args.warmup < 1 or args.runs < 1:
-        parser.error("at least one warmup and one measured run are required")
+    if args.warmup < 0 or args.runs < 1:
+        parser.error("warmup must be nonnegative and runs must be positive")
+    if args.warmup == 0 and args.profile != "on":
+        parser.error("zero warmup is for --profile on diagnostics only; speed comparisons require warmup")
     if args.compile != "off" and (args.attention != "sdpa" or args.profile != "off" or args.residency != "on" or args.resolution == "1080p"):
         parser.error("compile experiments require --attention sdpa --profile off --residency on and 480p/720p (no postprocess offload)")
     for path in (args.image, args.last_image, args.prompt_file):
@@ -157,6 +159,7 @@ def main(argv=None) -> int:
         if path is not None:
             settings[f"{name}_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
     report = {
+        "measurement_kind": "cold_diagnostic" if args.warmup == 0 else "warmed_benchmark",
         "settings": settings, "versions": versions(), "gpu": torch.cuda.get_device_name(0),
         "gpu_total_gib": torch.cuda.get_device_properties(0).total_memory / 1024**3,
         "cuda": torch.version.cuda, "runs": [], "status": "running",
